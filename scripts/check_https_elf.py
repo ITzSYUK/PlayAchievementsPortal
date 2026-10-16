@@ -2,6 +2,8 @@
 from pathlib import Path
 import struct
 import sys
+import re
+from check_prx_memory import check_memory
 
 
 def check(path, kernel):
@@ -26,7 +28,7 @@ def check(path, kernel):
 
     info = by_name['.rodata.sceModuleInfo'][4]
     attr, minor, major = struct.unpack_from('<HBB', data, info)
-    assert (attr, minor, major) == (0x1000 if kernel else 0, 34, 0)
+    assert (attr, minor, major) == (0x1000 if kernel else 0, 41, 0)
     expected = 'RAClientBootstrap' if kernel else 'RAClientUser'
     assert name_at(info+4) == expected
     first, last = struct.unpack_from('<II', data, info+36)
@@ -53,7 +55,12 @@ def check(path, kernel):
                 assert struct.unpack_from('<I', data, offset(address))[0] == 2048
                 found = True
         assert found, 'heap pin missing'
-    print('PASS PSP metadata:', expected, '0.34, start/stop/info exports, heap' if not kernel else '0.34, start/stop/info exports')
+    if not kernel:
+        shared = Path(__file__).resolve().parents[1] / 'experiments/ingame/client_shared.h'
+        limit = int(re.search(r'#define RA_CLIENT_MODULE_LIMIT (\d+)u', shared.read_text()).group(1))
+        used = check_memory(path.with_suffix('.prx').read_bytes(), limit)
+        print(f'PASS final PRX PT_LOAD: {used} bytes, loader limit={limit}, margin={limit-used}')
+    print('PASS PSP metadata:', expected, '0.41, start/stop/info exports, heap' if not kernel else '0.41, start/stop/info exports')
 
 
 check(Path(sys.argv[1]), True)

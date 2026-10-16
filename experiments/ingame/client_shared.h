@@ -5,8 +5,8 @@
 #define RA_CLIENT_MAGIC UINT32_C(0x52414339)
 #ifdef RA_CLIENT_HTTPS
 #include "ra_game_memory.h"
-#define RA_CLIENT_MINOR 34
-#define RA_CLIENT_VERSION "0.34"
+#define RA_CLIENT_MINOR 41
+#define RA_CLIENT_VERSION "0.41"
 #define RA_CLIENT_RUNTIME "rc_client-softcore"
 #define RA_CLIENT_STATIC_AUDIT_ONLY 0
 #define RA_CLIENT_RUNTIME_PROBE_ONLY 0
@@ -19,7 +19,7 @@
 #define RA_CLIENT_REQUEST_SECOND 10u
 #define RA_CLIENT_OBSERVE_SECONDS 720u
 #define RA_CLIENT_BOOT_LOG_LIMIT 131072u
-#define RA_CLIENT_SAMPLE_MS 120000u
+#define RA_CLIENT_SAMPLE_MS 0u
 #define RA_CLIENT_USER_SIZE UINT32_C(0x02800000)
 #define RA_CLIENT_HEAP_BYTES 2097152u
 #define RA_CLIENT_STACK_BYTES 32768u
@@ -47,9 +47,10 @@ static inline int ra_client_user_range(uint32_t address, uint32_t size)
 }
 #define RA_CLIENT_ENTRY_STACK 8192u
 #ifdef RA_CLIENT_HTTPS
-/* Measured 0.16 ELF is ~299 KiB; full set parsing links the real formatter. */
-#define RA_CLIENT_MODULE_LIMIT 327680u
-#define RA_CLIENT_FILE_LIMIT 393216u
+/* 0.40 reconnect/status code needs ~340 KiB PT_LOAD and ~405 KiB PRX.
+ * Both bounds enter preflight; the free floor and heap are unchanged. */
+#define RA_CLIENT_MODULE_LIMIT 352256u
+#define RA_CLIENT_FILE_LIMIT 417792u
 #else
 #define RA_CLIENT_MODULE_LIMIT 294912u
 #define RA_CLIENT_FILE_LIMIT 327680u
@@ -83,6 +84,7 @@ typedef struct {
     volatile uint32_t probe_wrapper, probe_installed, probe_active;
     volatile uint32_t probe_calls, probe_object;
     volatile int32_t probe_last_result;
+    volatile uint32_t notice_wrapper,notice_installed,notice_active;
 #endif
 } ra_client_control;
 typedef struct { ra_client_control* control; } ra_client_args;

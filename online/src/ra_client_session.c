@@ -2,6 +2,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include "rc_api_runtime.h"
+#include "rc_error.h"
 #include "../../vendor/rcheevos/src/rc_client_internal.h"
 #ifdef RA_SESSION_STATE_TEST
 #include "rc_client_internal.h"
@@ -29,6 +30,8 @@ struct ra_client_session {
     unsigned next_ticket;
     int stopping, auth_pending, load_pending;
     int online_softcore;
+    unsigned encore, encore_ready, initial_unlocked_count;
+    unsigned initial_unlocked[RA_UI_MAX];
     ra_session_event events[256];
     unsigned event_read, event_write;
     ra_session_diagnostic* diagnostic;
@@ -119,6 +122,19 @@ static void event_push(ra_client_session* s, unsigned type, unsigned id)
     event->type = type; event->achievement_id = id;
     event->time_ms = (unsigned)s->config.now_ms(s->config.context);
 }
+static int initial_unlock(const ra_client_session* s,unsigned id)
+{
+    unsigned i;
+    for(i=0;i<s->initial_unlocked_count;++i)if(s->initial_unlocked[i]==id)return 1;
+    return 0;
+}
+/* Private callback ABI pinned by dependencies.lock.json, as diagnostics are.
+ * Fail closed before the initial server snapshot exists. No synthetic ACK. */
+static int RC_CCONV encore_can_submit(uint32_t id,rc_client_t* client)
+{
+    const ra_client_session* s=rc_client_get_userdata(client);
+    return s->encore_ready && !initial_unlock(s,id);
+}
 int ra_session_take_event(ra_client_session* s, ra_session_event* event)
 {
     if (!s || !event || s->event_read == s->event_write) return 0;
@@ -138,6 +154,33 @@ static void diagnostic_text(char* out, size_t capacity, const char* text)
         out[i]=(unsigned char)text[i]<32 || (unsigned char)text[i]==127?' ':text[i];
     out[i]=0;
 }
+int ra_session_prepare_ui(ra_client_session* s, ra_ui* ui)
+{
+    rc_client_achievement_list_t* list;
+    unsigned b,i;
+    if(!s || !ui || s->stopping || s->load_pending || s->stats.frame_calls ||
+       !rc_client_get_game_info(s->client))return 0;
+    memset(ui,0,sizeof(*ui)); ui->spectator=(unsigned)!s->online_softcore;
+    ui->encore=s->encore;
+    list=rc_client_create_achievement_list(s->client,RC_CLIENT_ACHIEVEMENT_CATEGORY_CORE,
+                                          RC_CLIENT_ACHIEVEMENT_LIST_GROUPING_LOCK_STATE);
+    if(!list)return 0;
+    for(b=0;b<list->num_buckets;++b)for(i=0;i<list->buckets[b].num_achievements;++i) {
+        const rc_client_achievement_t* a=list->buckets[b].achievements[i];
+        ra_ui_row* row;
+        if(a->id>=101000001u)continue; /* client warning, not an achievement */
+        if(ui->count==RA_UI_MAX) { ui->count=0; rc_client_destroy_achievement_list(list); return 0; }
+        row=&ui->rows[ui->count++]; row->id=a->id; row->points=a->points;
+        /* Spectator does not fetch account unlocks in pinned rc_client.
+         * Never present its local trigger state as server confirmation. */
+        row->state=!ui->spectator && a->unlocked?RA_UI_CONFIRMED:
+            a->state==RC_CLIENT_ACHIEVEMENT_STATE_DISABLED?RA_UI_UNSUPPORTED:RA_UI_LOCKED;
+        diagnostic_text(row->title,sizeof(row->title),a->title);
+        diagnostic_text(row->description,sizeof(row->description),a->description);
+    }
+    rc_client_destroy_achievement_list(list);
+    return ui->count!=0;
+}
 const ra_session_warning* ra_session_get_warning(const ra_client_session* s)
 { return s && s->warning.id?&s->warning:NULL; }
 static void RC_CCONV client_event(const rc_client_event_t* event, rc_client_t* client)
@@ -152,6 +195,10 @@ static void RC_CCONV client_event(const rc_client_event_t* event, rc_client_t* c
             diagnostic_text(s->warning.description,sizeof(s->warning.description),event->achievement->description);
             event_push(s, RA_SESSION_EVENT_WARNING, event->achievement->id);
             return;
+        }
+        if(s->encore && event->achievement && initial_unlock(s,event->achievement->id)) {
+            ++s->stats.encore_events;
+            event_push(s,RA_SESSION_EVENT_ENCORE,event->achievement->id);return;
         }
         ++s->stats.earned_events;
         s->stats.last_earned_id = event->achievement ? event->achievement->id : 0;
@@ -267,7 +314,7 @@ static void RC_CCONV server_call(const rc_api_request_t* request, rc_client_serv
     void* data, rc_client_t* client)
 {
     ra_client_session* s = rc_client_get_userdata(client);
-    const rc_api_server_response_t failure = { "", 0, RC_API_SERVER_RESPONSE_CLIENT_ERROR };
+    rc_api_server_response_t failure = { "", 0, RC_API_SERVER_RESPONSE_CLIENT_ERROR };
     size_t size = request->post_data ? bounded_length(request->post_data, RA_SESSION_POST_LIMIT) : 0;
     unsigned i;
     /* Reject credentials over plain HTTP and all unexpected hosts/paths. */
@@ -283,6 +330,9 @@ static void RC_CCONV server_call(const rc_api_request_t* request, rc_client_serv
         callback(&failure, data); return;
     }
     lock(s);
+    /* A full bounded transport queue is temporary backpressure, not rejection
+     * of the achievement. rc_client retains its bounded per-achievement retry. */
+    if(!s->stopping)failure.http_status_code=RC_API_SERVER_RESPONSE_RETRYABLE_CLIENT_ERROR;
     if (!s->stopping && s->stats.buffer_bytes <= RA_SESSION_BUFFER_LIMIT &&
         size + 1 <= RA_SESSION_BUFFER_LIMIT - s->stats.buffer_bytes) {
         for (i = 0; i < RA_SESSION_SLOTS; ++i) {
@@ -290,7 +340,7 @@ static void RC_CCONV server_call(const rc_api_request_t* request, rc_client_serv
             if (slot->state != EMPTY) continue;
             if (request->post_data) {
                 slot->post = malloc(size + 1);
-                if (!slot->post) break;
+                if (!slot->post) {failure.http_status_code=RC_API_SERVER_RESPONSE_CLIENT_ERROR;break;}
                 memcpy(slot->post, request->post_data, size + 1);
                 slot->post_size = size;
                 s->stats.buffer_bytes += size + 1;
@@ -329,6 +379,15 @@ ra_client_session* ra_session_create(const ra_session_config* config)
     /* Do not enable library request/error logging: it may include secrets. */
     return s;
 }
+int ra_session_enable_encore(ra_client_session* s)
+{
+    if(!s || !s->online_softcore || s->stopping || s->auth_pending || s->load_pending ||
+       rc_client_get_user_info(s->client) || rc_client_get_game_info(s->client))return 0;
+    s->encore=1;
+    rc_client_set_encore_mode_enabled(s->client,1);
+    s->client->callbacks.can_submit_achievement_unlock=encore_can_submit;
+    return 1;
+}
 int ra_session_enable_online_softcore(ra_client_session* s)
 {
 #if defined(RA_SESSION_ONLINE) && !defined(RA_SESSION_NO_FRAMES)
@@ -353,6 +412,23 @@ static void RC_CCONV game_complete(int result, const char* message, rc_client_t*
     ra_client_session* s = data;
     (void)message; (void)client;
     s->load_pending = 0; s->stats.last_result = result;
+    if(result==RC_OK && s->encore) {
+        unsigned b,i;
+        rc_client_achievement_list_t* list=rc_client_create_achievement_list(client,
+            RC_CLIENT_ACHIEVEMENT_CATEGORY_CORE,RC_CLIENT_ACHIEVEMENT_LIST_GROUPING_LOCK_STATE);
+        if(!list){s->stats.last_result=RC_OUT_OF_MEMORY;return;}
+        s->initial_unlocked_count=0;
+        for(b=0;b<list->num_buckets;++b)for(i=0;i<list->buckets[b].num_achievements;++i) {
+            const rc_client_achievement_t* a=list->buckets[b].achievements[i];
+            if(a->id>=101000001u || !a->unlocked)continue;
+            if(s->initial_unlocked_count==RA_UI_MAX) {
+                s->stats.last_result=RC_INSUFFICIENT_BUFFER;
+                rc_client_destroy_achievement_list(list);return;
+            }
+            s->initial_unlocked[s->initial_unlocked_count++]=a->id;
+        }
+        rc_client_destroy_achievement_list(list);s->encore_ready=1;
+    }
 }
 int ra_session_login_token(ra_client_session* s, const char* username, const char* token)
 {
@@ -412,8 +488,12 @@ int ra_session_complete(ra_client_session* s, unsigned ticket, int status, const
         if (slot->state != ACTIVE || slot->ticket != ticket) continue;
         slot->status = RC_API_SERVER_RESPONSE_CLIENT_ERROR;
         s->stats.last_copy_error = RA_SESSION_COPY_OK;
-        if (s->stopping || s->config.now_ms(s->config.context) >= slot->deadline_ms)
+        if (s->stopping)
             s->stats.last_copy_error = RA_SESSION_COPY_CANCELLED;
+        else if(status==RA_SESSION_RETRYABLE || (status>=100 && s->config.now_ms(s->config.context) >= slot->deadline_ms)) {
+            slot->status=RC_API_SERVER_RESPONSE_RETRYABLE_CLIENT_ERROR;
+            s->stats.last_copy_error=RA_SESSION_COPY_TRANSPORT;
+        }
         else if (status < 100 || status > 599) s->stats.last_copy_error = RA_SESSION_COPY_TRANSPORT;
         else if (size > RA_SESSION_RESPONSE_LIMIT) s->stats.last_copy_error = RA_SESSION_COPY_BODY_LIMIT;
         else if (!body && size) s->stats.last_copy_error = RA_SESSION_COPY_INVALID_BODY;
@@ -444,11 +524,12 @@ static void pump(ra_client_session* s)
         size_t post_bytes, body_bytes;
         lock(s);
         if (s->slots[i].state == QUEUED && s->config.now_ms(s->config.context) >= s->slots[i].deadline_ms) {
-            s->slots[i].status = RC_API_SERVER_RESPONSE_CLIENT_ERROR;
+            s->slots[i].status = s->stopping?RC_API_SERVER_RESPONSE_CLIENT_ERROR:RC_API_SERVER_RESPONSE_RETRYABLE_CLIENT_ERROR;
             s->slots[i].state = COMPLETE;
         }
         if (s->slots[i].state != COMPLETE) { unlock(s); continue; }
         done = s->slots[i]; memset(&s->slots[i], 0, sizeof(s->slots[i]));
+        s->stats.last_http_status=done.status==RC_API_SERVER_RESPONSE_RETRYABLE_CLIENT_ERROR?RA_SESSION_RETRYABLE:done.status;
         post_bytes = done.post ? done.post_size + 1 : 0;
         body_bytes = done.body ? done.body_size + 1 : 0;
         --s->stats.pending; ++s->stats.completed;

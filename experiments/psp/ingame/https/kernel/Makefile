@@ -12,6 +12,7 @@ PRX_EXPORTS = exports.exp
 PSPSDK := $(shell psp-config --pspsdk-path)
 .DEFAULT_GOAL := all
 include $(PSPSDK)/lib/build.mak
+main.o: notice_hook.h ../../../../ingame/display_import.h
 main.o: main.c game_audit.h ../../client/kernel/main.c ../../../../ingame/client_shared.h ../../../../ingame/game_code_audit.h ../../../../../online/include/ra_game_memory.h
 game_code_audit.o: ../../../../ingame/game_code_audit.h
 ra_game_memory.o: ../../../../../online/include/ra_game_memory.h

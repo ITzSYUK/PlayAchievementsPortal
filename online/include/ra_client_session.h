@@ -2,6 +2,7 @@
 #define RA_CLIENT_SESSION_H
 #include "rc_client.h"
 #include "ra_response_limits.h"
+#include "ra_ui.h"
 #define RA_SESSION_SLOTS 2
 #define RA_SESSION_POST_LIMIT 8192u
 #define RA_SESSION_RESPONSE_LIMIT RA_RESPONSE_BODY_LIMIT
@@ -9,6 +10,8 @@
  * Both slots together must fit this shared budget. */
 #define RA_SESSION_BUFFER_LIMIT (RA_SESSION_POST_LIMIT + 1u + RA_SESSION_RESPONSE_LIMIT + 1u)
 #define RA_SESSION_TIMEOUT_MS 30000u
+/* Explicit transport classification. TLS/security/format failures stay fatal. */
+#define RA_SESSION_RETRYABLE (-2)
 enum { RA_SESSION_COPY_OK, RA_SESSION_COPY_CANCELLED, RA_SESSION_COPY_TRANSPORT,
        RA_SESSION_COPY_BODY_LIMIT, RA_SESSION_COPY_BUFFER_LIMIT, RA_SESSION_COPY_NO_MEMORY,
        RA_SESSION_COPY_INVALID_BODY };
@@ -33,8 +36,9 @@ typedef struct {
     unsigned submitted, completed, pending, idle_calls, frame_calls, earned_events;
     unsigned award_requests, award_confirmed, server_errors, last_earned_id, last_confirmed_id;
     unsigned event_dropped, warning_events;
+    unsigned encore_events;
     size_t buffer_bytes, peak_buffer_bytes;
-    int last_result, last_copy_error;
+    int last_result, last_copy_error, last_http_status;
     int logged_in, game_loaded, spectator, hardcore;
     int auth_pending, load_pending;
     unsigned game_id, console_id, achievements, unsupported, unlocked;
@@ -43,8 +47,11 @@ typedef struct {
  * Default is spectator. Online softcore must be explicitly selected BEFORE login. */
 ra_client_session* ra_session_create(const ra_session_config*);
 int ra_session_enable_online_softcore(ra_client_session*);
+/* Before login, after selecting online softcore. Replays never submit known
+ * server unlocks; new achievements retain normal softcore submission. */
+int ra_session_enable_encore(ra_client_session*);
 enum { RA_SESSION_EVENT_CONDITION = 1, RA_SESSION_EVENT_CONFIRMED, RA_SESSION_EVENT_REJECTED,
-       RA_SESSION_EVENT_WARNING };
+       RA_SESSION_EVENT_WARNING, RA_SESSION_EVENT_ENCORE = 6 };
 
 /* Read-only diagnostics of the pinned native rc_client runtime. No extra reads,
  * evaluation, callbacks or pointers leave the serialized owner. Bounds are explicit. */
@@ -74,6 +81,9 @@ typedef struct { unsigned type, achievement_id, time_ms; } ra_session_event;
 /* Owner-only bounded diagnostics. No strings, secrets or callback pointers. */
 int ra_session_take_event(ra_client_session*, ra_session_event*);
 int ra_session_achievement_state(ra_client_session*, unsigned achievement_id);
+/* Owner only, before frames begin. Copy server catalog; no client pointers
+ * escape. Failure leaves UI empty (no truncated set advertised as complete). */
+int ra_session_prepare_ui(ra_client_session*, ra_ui*);
 int ra_session_login_token(ra_client_session*, const char* username, const char* token);
 /* The caller must compute/verify this hash from the actual image first. */
 int ra_session_load_game(ra_client_session*, const char* verified_hash);

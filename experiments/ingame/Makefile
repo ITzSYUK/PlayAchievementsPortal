@@ -3,6 +3,31 @@ CC ?= cc
 CPPFLAGS += -I../../online/include
 CFLAGS ?= -O2 -g -std=c99 -Wall -Wextra -Werror
 .PHONY: test
+test: display-import-test
+test: reconnect-test
+.PHONY: reconnect-test
+reconnect-test: $(BUILD)/test_reconnect
+	$(BUILD)/test_reconnect
+$(BUILD)/test_reconnect: test_reconnect.c reconnect_policy.h ../psp/ingame/https/user/reconnect.h
+	mkdir -p $(BUILD)
+	$(CC) $(CPPFLAGS) $(CFLAGS) -I. -I../../vendor/rcheevos/include test_reconnect.c $(LDFLAGS) -o $@
+test: prx-memory-test
+.PHONY: prx-memory-test
+prx-memory-test:
+	python3 ../../scripts/test_prx_memory.py
+.PHONY: display-import-test
+display-import-test: $(BUILD)/test_display_import
+	$(BUILD)/test_display_import
+$(BUILD)/test_display_import: test_display_import.c display_import.h
+	mkdir -p $(BUILD)
+	$(CC) $(CPPFLAGS) $(CFLAGS) test_display_import.c $(LDFLAGS) -o $@
+test: ui-display-test
+.PHONY: ui-display-test
+ui-display-test: $(BUILD)/test_ui_display
+	$(BUILD)/test_ui_display
+$(BUILD)/test_ui_display: test_ui_display.c ui_display.h ui_pause.h
+	mkdir -p $(BUILD)
+	$(CC) $(CPPFLAGS) $(CFLAGS) test_ui_display.c -pthread $(LDFLAGS) -o $@
 test: $(BUILD)/test_log_sync
 $(BUILD)/test_log_sync: test_log_sync.c ../psp/ingame/https/user/log_sync.h
 	mkdir -p $(BUILD)

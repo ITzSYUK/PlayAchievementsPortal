@@ -9,6 +9,13 @@ RC_OBJECTS = $(patsubst $(RC_ROOT)/%.c,$(BUILD)/rcheevos/%.o,$(RC_SOURCES))
 LOCAL_OBJECTS = $(BUILD)/ra_psp_memory.o $(BUILD)/ra_psp_hash.o $(BUILD)/offline_probe.o $(BUILD)/offline_main.o $(BUILD)/hash_probe.o $(BUILD)/probe_log.o $(BUILD)/test_probe_log.o $(BUILD)/ra_client_session.o $(BUILD)/test_client_session.o
 
 .PHONY: all test
+all: $(BUILD)/test_ui
+$(BUILD)/test_ui: test_ui.c ../../online/src/ra_ui.c ../../online/src/ra_ui_draw.c ../../online/include/ra_ui.h
+	$(CC) $(CPPFLAGS) $(CFLAGS) test_ui.c ../../online/src/ra_ui.c ../../online/src/ra_ui_draw.c -pthread $(LDFLAGS) -o $@
+test: ui-test
+.PHONY: ui-test
+ui-test: $(BUILD)/test_ui
+	$(BUILD)/test_ui
 all: $(BUILD)/test_session_mailbox
 $(BUILD)/test_session_mailbox: test_session_mailbox.c ../ingame/session_mailbox.h ../../online/src/ra_client_session.c ../../online/include/ra_client_session.h $(BUILD)/librcheevos.a
 	$(CC) $(CPPFLAGS) -I../ingame $(CFLAGS) -DRA_SESSION_ONLINE test_session_mailbox.c ../../online/src/ra_client_session.c $(BUILD)/librcheevos.a -pthread $(LDFLAGS) $(LDLIBS) -o $@

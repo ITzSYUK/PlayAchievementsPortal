@@ -69,7 +69,7 @@ static int log_write(const void* data, unsigned size, void* unused)
 {
     int rc;
     (void)unused;
-    if (size > RA_CLIENT_BOOT_LOG_LIMIT - written) return -35101;
+    if (size > RA_CLIENT_BOOT_LOG_LIMIT - written) return (int)size;
     rc = sceIoWrite(log_fd, data, size);
     if (rc > 0) written += (unsigned)rc;
     return rc;
@@ -123,6 +123,7 @@ static int game_map_live(void)
             (uint32_t)info.segmentsize[i] != control->game_map.regions[i].size) return -35409;
     return 0;
 }
+#include "../../https/kernel/notice_hook.h"
 #if RA_CLIENT_HOOK_ENABLED
 static int install_runtime_probe(void)
 {
@@ -263,6 +264,10 @@ static int cleanup(void)
     SceKernelSMOption option;
     int rc, status = -1;
 #ifdef RA_CLIENT_HTTPS
+    /* A menu callback may be cooperatively parked outside engine_gate.
+     * Signal it before waiting for probe_active during slot restoration. */
+    if(control)control->stop=1;
+    rc=remove_notice_hook();if(rc<0)return rc;
     rc=remove_runtime_probe();if(rc<0)return rc;
     /* A thread could have fetched the wrapper before slot restoration and
      * still be suspended before entering it. No finite grace period proves
@@ -388,8 +393,12 @@ static int observer(SceSize args, void* argp)
         sceKernelDelayThread(250000);
     }
     if (tries == 120 || stopping) { result = -35106; goto done; }
+#ifdef RA_CLIENT_HTTPS
+    for (second = 0; !stopping; ++second) {
+#else
     for (second = 0; second <= RA_CLIENT_OBSERVE_SECONDS && !stopping; ++second) {
-        result = snapshot(second <= 20 || second % 5 == 0 ? "observe" : NULL, second, NULL);
+#endif
+        result = snapshot(second <= 20 || second % 60 == 0 ? "observe" : NULL, second, NULL);
         if (result < 0) break;
         if (second == RA_CLIENT_LOAD_SECOND) { result = start_client(second); if (result != 0) break; }
 #ifdef RA_CLIENT_HTTPS
@@ -397,6 +406,10 @@ static int observer(SceSize args, void* argp)
             result = publish_game_map(); if (result) break;
 #if RA_CLIENT_HOOK_ENABLED
             result = install_runtime_probe(); if (result) break;
+            {
+                int notice_result=install_notice_hook();
+                if(notice_result)record("NOTICE_HOOK_UNAVAILABLE",notice_result);
+            }
 #endif
             control->request_allowed = 1;
             ra_probe_log_printf(&logger, "HTTPS_REQUEST_RELEASE second=%u network_ready=%u\n", second, (unsigned)control->ready);
@@ -413,7 +426,9 @@ static int observer(SceSize args, void* argp)
         if (control && control->done) { result = control->result; break; }
         if (control && control->stop) { result = control->result ? control->result : -35106; break; }
         if (second >= 20 && control && !control->ready) { result = -35107; break; }
+#ifndef RA_CLIENT_HTTPS
         if (second == RA_CLIENT_OBSERVE_SECONDS) break;
+#endif
         sceKernelDelayThread(1000000);
     }
 done:

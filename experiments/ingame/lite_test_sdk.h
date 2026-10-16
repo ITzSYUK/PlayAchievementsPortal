@@ -43,6 +43,7 @@ int sceKernelStopModule(int, unsigned, void*, int*, SceKernelSMOption*);
 int sceKernelCpuSuspendIntr(void);
 void sceKernelCpuResumeIntr(int);
 void sceKernelDcacheWritebackInvalidateRange(const void*, unsigned);
+void sceKernelIcacheInvalidateRange(const void*, unsigned);
 void* sceKernelFindModuleByName(const char*);
 int sceKernelDelayThread(unsigned);
 int sceKernelCreateThread(const char*, int (*)(SceSize, void*), int, unsigned, unsigned, void*);

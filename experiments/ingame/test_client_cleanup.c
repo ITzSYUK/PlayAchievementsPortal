@@ -42,6 +42,7 @@ static struct {
     int worker_done, stop_diag;
     unsigned starts, stops, unloads, frees, log_length, user_free, seconds;
     int timed_worker;
+    unsigned done_second;
     char log[32768];
 } mock;
 static void reset(void)
@@ -70,6 +71,8 @@ int sceKernelCpuSuspendIntr(void) { return 0; }
 void sceKernelCpuResumeIntr(int state) { (void)state; }
 void sceKernelDcacheWritebackInvalidateRange(const void* address, unsigned size)
 { assert(address == (const void*)(uintptr_t)UINT32_C(0x089B4EE4) && size == 4); }
+void sceKernelIcacheInvalidateRange(const void* address,unsigned size)
+{ (void)address;assert(size==8); }
 int sceKernelStopModule(int uid, unsigned size, void* args, int* status, SceKernelSMOption* option)
 {
     assert(uid == 42 && size == 0 && args == NULL && control->stop);
@@ -166,7 +169,7 @@ int sceKernelDelayThread(unsigned us)
     if (mock.timed_worker) {
         assert(control && mock.starts == 1);
         assert(control->request_allowed == (mock.seconds >= RA_CLIENT_REQUEST_SECOND));
-        if (control->request_allowed) control->done = 1;
+        if (control->request_allowed && (!mock.done_second || mock.seconds>=mock.done_second)) control->done = 1;
     }
 #endif
     ++mock.seconds; return 0;
@@ -185,6 +188,9 @@ static void prepare_start(void)
 }
 int main(void)
 {
+    prepare_start(); written=RA_CLIENT_BOOT_LOG_LIMIT;
+    assert(ra_probe_log_printf(&logger,"full log is not a session failure\n") && !logger.error);
+    assert(written==RA_CLIENT_BOOT_LOG_LIMIT);
     reset(); assert(cleanup() == 0 && child == -1 && block == -1 && control == NULL);
     assert(mock.stops == 1 && mock.unloads == 1 && mock.frees == 1);
     reset(); mock.stop_error = -77;
@@ -217,6 +223,17 @@ int main(void)
     module_test.text_size = 128; module_test.data_size = module_test.bss_size = 1024;
     module_test.nsegment = 1; module_test.segmentaddr[0] = 0x08804000; module_test.segmentsize[0] = 2304;
     assert(validate_child() == 0);
+    module_test.segmentsize[0] = RA_CLIENT_MODULE_LIMIT;
+    assert(validate_child() == 0);
+    module_test.segmentsize[0] = RA_CLIENT_MODULE_LIMIT + 1;
+    assert(validate_child() == -35104);
+#ifdef RA_CLIENT_HTTPS
+    module_test.text_size = 330820; module_test.data_size = 1788; module_test.bss_size = 11380;
+    module_test.segmentsize[0] = 344332; /* actual relocated 0.38 module */
+    assert(validate_child() == 0);
+#endif
+    module_test.text_size = 128; module_test.data_size = module_test.bss_size = 1024;
+    module_test.segmentsize[0] = 2304;
     module_test.entry_addr = 0x0880407Du; assert(validate_child() == -35104);
     module_test.entry_addr = 0x88804000u; assert(validate_child() == -35104);
     module_test.entry_addr = 0x08805000u; assert(validate_child() == -35104);
@@ -398,6 +415,15 @@ int main(void)
         assert(strstr(mock.log,"RUNTIME_PROBE_INSTALL") && strstr(mock.log,"RUNTIME_PROBE_RESTORE"));
         assert(strstr(mock.log,"HTTPS_REQUEST_RELEASE second=10 network_ready=1"));
         assert(mapped_control->game_map.count==2 && mapped_control->game_map.regions[0].address==0x08840000);
+        /* A live worker must survive the old bootstrap 720-second watchdog. */
+        prepare_start();mock.timed_worker=1;mock.done_second=RA_CLIENT_OBSERVE_SECONDS+120;
+        game_test.text_addr=game_test.segmentaddr[0]=0x08840000;game_test.text_size=65536;
+        game_test.segmentsize[0]=65536;game_test.segmentaddr[1]=0x089B4000;
+        game_test.segmentsize[1]=4096;game_test.nsegment=2;
+        descriptor[5]=0x08842D90;
+        assert(observer(0,NULL)==0 && observer_result==0);
+        assert(mock.seconds==mock.done_second+1 && mock.seconds>RA_CLIENT_OBSERVE_SECONDS);
+        assert(descriptor[5]==0x08842D90 && !probe_hook_installed);
         control=mapped_control;assert(game_map_live()==0);
         game_test.segmentaddr[0]+=4;assert(game_map_live()==-35409);game_test.segmentaddr[0]-=4;
         game_query_error=-55;assert(game_map_live()==-55);control=NULL;

@@ -120,7 +120,9 @@ int main(void)
     session = begin_set(&request);
     clock_ms += RA_SESSION_TIMEOUT_MS + 1;
     assert(ra_session_complete(session, request.ticket, 200, "x", 1));
-    ra_session_get_stats(session, &stats); assert(stats.last_copy_error == RA_SESSION_COPY_CANCELLED);
+    ra_session_get_stats(session, &stats); assert(stats.last_copy_error == RA_SESSION_COPY_TRANSPORT);
+    ra_session_tick(session,0,1);ra_session_get_stats(session,&stats);
+    assert(stats.last_http_status==RA_SESSION_RETRYABLE && !stats.pending && !stats.game_loaded);
     assert(ra_session_close(session));
     assert(erased_copies == 3);
     puts("PASS large session: real rc_client parses synthetic 129891/262144-byte sets, queue cap/peak, copy isolation, erase-before-free, close/limit/timeout/OOM");
