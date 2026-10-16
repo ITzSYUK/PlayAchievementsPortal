@@ -13,6 +13,7 @@ desktop.ini
 
 # PSP build artifacts
 *.o
+*.d
 *.a
 *.elf
 *.prx
@@ -61,3 +62,15 @@ tools/ra_import/badge_cache/
 !.env.example
 *.pem
 *.key
+auth.txt
+
+# Local audit downloads and experiment output
+.work/
+build/
+*.exe
+*.obj
+*.lib
+*.iso
+*.cso
+experiments/psp/offline/stdout.txt
+experiments/psp/https/stdout.txt

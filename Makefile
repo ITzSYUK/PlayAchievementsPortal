@@ -1,4 +1,4 @@
-.PHONY: all plugin clean rebuild dist public-check release
+.PHONY: all plugin clean rebuild dist public-check release online-test tls-test compact-tls-test ingame-test psp-probes
 
 VERSION ?= 2.0.0
 
@@ -23,3 +23,21 @@ public-check:
 
 release: public-check dist
 	python3 scripts/make_release.py --version $(VERSION)
+
+online-test:
+	$(MAKE) -C experiments/host test
+
+tls-test:
+	$(MAKE) -C experiments/tls test
+
+compact-tls-test:
+	$(MAKE) -C experiments/tls/compact test
+
+ingame-test:
+	$(MAKE) -C experiments/ingame test
+
+psp-probes:
+	$(MAKE) -C experiments/psp/offline
+	$(MAKE) -C experiments/psp/https
+	$(MAKE) -C experiments/psp/entropy
+	$(MAKE) -C experiments/psp/mbedtls

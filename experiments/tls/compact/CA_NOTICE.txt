@@ -1,0 +1,9 @@
+Public trust anchor: GTS Root R4, Google Trust Services LLC.
+Extracted without changing certificate bytes from vendor/ca/cacert.crt,
+Mozilla-derived curl CA bundle dated 2026-09-25, licensed under MPL-2.0.
+Bundle: https://curl.se/ca/cacert-2026-09-25.pem
+Bundle SHA256: a41b5d356aea97a529fe27e0f7316d2f9d946d75927476cf9cf1b90637d00505
+DER SHA256: 349dfa4058c5e263123b398ae795573c4e1313c83fe68f93556cd5e8031b3c7d
+Reproduction: python3 scripts/extract_ra_tls_root.py --write
+This narrow trust store is for this RA experiment. Chain changes fail closed.
+The full CA bundle and Mbed TLS source remain unchanged in the repository.

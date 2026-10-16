@@ -11,7 +11,7 @@ permissions:
 jobs:
   build:
     runs-on: ubuntu-latest
-    container: ghcr.io/pspdev/pspsdk:latest
+    container: ghcr.io/pspdev/pspsdk@sha256:511bd8c9eaff77c8a2e205631ae060b9cdf0e9b7e61a7a6ef19482fb4affcdfa
 
     steps:
       - name: Check out source

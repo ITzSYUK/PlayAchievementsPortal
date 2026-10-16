@@ -1,0 +1,10 @@
+{
+  "source": "owner ISO; read-only inspection and official rcheevos v12.5.0 computation on PC",
+  "iso_size": 589758464,
+  "ra_hash": "199515744d49ef3620a5f9297c6116f9",
+  "module_name": "LocoRoco",
+  "umd_id": "UCUS-98662",
+  "param_sfo": {"size": 472, "md5": "39e624e56d7294199fbb7bc0c24c1f28", "magic": "00505346"},
+  "eboot_bin": {"size": 2329168, "md5": "af16340c57aee40d9ce9e402f2c4d15e", "magic": "7e505350"},
+  "reference_is_not_client_identification": true
+}

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Reject private/generated files that are tracked or present in a clean export."""
+"""Reject private/generated files in tracked/unignored paths or a clean export."""
 
 from __future__ import annotations
 
@@ -21,7 +21,9 @@ SKIP_DIR_NAMES = {
     ".idea",
     ".venv",
     ".vscode",
+    ".work",
     "__pycache__",
+    "build",
     "dist",
     "release",
     "releases",
@@ -29,6 +31,7 @@ SKIP_DIR_NAMES = {
 }
 
 FORBIDDEN_EXACT_NAMES = {
+    "auth.txt",
     ".DS_Store",
     "Thumbs.db",
     "desktop.ini",
@@ -41,13 +44,18 @@ FORBIDDEN_SUFFIXES = {
     ".dat",
     ".dmp",
     ".dump",
+    ".exe",
     ".elf",
     ".game.json",
+    ".iso",
+    ".cso",
     ".jsonl",
     ".key",
     ".log",
+    ".lib",
     ".map",
     ".o",
+    ".obj",
     ".pach",
     ".pbad",
     ".pbp",
@@ -66,12 +74,12 @@ def is_forbidden_suffix(name: str) -> bool:
     return any(lowered.endswith(suffix) for suffix in FORBIDDEN_SUFFIXES)
 
 
-def git_tracked_paths(root: Path) -> list[Path] | None:
+def git_project_paths(root: Path) -> list[Path] | None:
     if not (root / ".git").exists():
         return None
 
     result = subprocess.run(
-        ["git", "-C", str(root), "ls-files", "-z"],
+        ["git", "-C", str(root), "ls-files", "--cached", "--others", "--exclude-standard", "-z"],
         check=False,
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
@@ -98,7 +106,9 @@ def exported_paths(root: Path) -> list[Path]:
 
 def scan(root: Path) -> list[str]:
     problems: list[str] = []
-    paths = git_tracked_paths(root) or exported_paths(root)
+    paths = git_project_paths(root)
+    if paths is None:
+        paths = exported_paths(root)
 
     for path in sorted(paths):
         relative = path.relative_to(root)
@@ -112,7 +122,7 @@ def scan(root: Path) -> list[str]:
                 problems.append(f"private/generated directory: {relative}")
             continue
 
-        if path.name in FORBIDDEN_EXACT_NAMES or path.name.startswith("._"):
+        if path.name in FORBIDDEN_EXACT_NAMES or path.name.lower() == "auth.txt" or path.name.startswith("._"):
             problems.append(f"forbidden file: {relative}")
             continue
 

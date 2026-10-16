@@ -1,0 +1,65 @@
+{
+  "upstream": {
+    "repository": "https://github.com/avetis-dev/PSPAchievementsSystem",
+    "commit": "e0cd8a9b3ccf439532b24b4f1faf2cfc8c0198ab",
+    "archive_sha256": "6d826da8293a4061e6a4fe9e62666735b95288047d0fed85cf0ada15fbe2c26c",
+    "license": "LICENSE_NOTICE.md: no open-source license selected"
+  },
+  "rcheevos": {
+    "repository": "https://github.com/RetroAchievements/rcheevos",
+    "tag": "v12.5.0",
+    "commit": "1433173220a7eaede6a9ed7a18e94117be1821e0",
+    "archive_sha256": "c2f619e3f113631e1f780361f7ffdbb8c65dc85ff846438b6f2d396b0b830c27",
+    "directory": "vendor/rcheevos",
+    "included": ["include", "src", "LICENSE", "README.md", "CHANGELOG.md"],
+    "license": "MIT",
+    "local_source_changes": false
+  },
+  "mbedtls": {
+    "repository": "https://github.com/Mbed-TLS/mbedtls",
+    "tag": "mbedtls-3.6.7",
+    "commit": "068ff080b369adfac81509f9b57b2afabaf82dc5",
+    "archive_url": "https://github.com/Mbed-TLS/mbedtls/releases/download/mbedtls-3.6.7/mbedtls-3.6.7.tar.bz2",
+    "archive_sha256": "a7e8bcbec0e6f761b4af24f25677626b35f762f68eef79c08677a363212d11f6",
+    "directory": "vendor/mbedtls",
+    "included": ["include", "library", "LICENSE", "README.md"],
+    "license_selected": "Apache-2.0",
+    "local_source_changes": false,
+    "configuration": "experiments/tls/psp_tls_config.h",
+    "compact_configuration": "experiments/tls/compact_tls_config.h"
+  },
+  "ca_bundle": {
+    "source": "https://curl.se/ca/cacert-2026-09-25.pem",
+    "source_date": "2026-09-25",
+    "sha256": "a41b5d356aea97a529fe27e0f7316d2f9d946d75927476cf9cf1b90637d00505",
+    "directory": "vendor/ca",
+    "file": "cacert.crt",
+    "certificates": 121,
+    "license": "MPL-2.0",
+    "local_content_changes": false,
+    "compact_anchor": "GTS Root R4",
+    "compact_anchor_der_sha256": "349dfa4058c5e263123b398ae795573c4e1313c83fe68f93556cd5e8031b3c7d",
+    "compact_anchor_generator": "scripts/extract_ra_tls_root.py"
+  },
+  "ark_api_reference": {
+    "repository": "https://github.com/PSP-Arkfive/ARK-5",
+    "commit": "a9b74547c0d1785cc77981462cf095bd5a76434f",
+    "files": ["SystemControl/exports.exp", "SystemControl/src/kubridge.c"],
+    "purpose": "KUBridge kuKernelLoadModule API reference; not the owner's installed CFW revision",
+    "interface_nid": "0x4C25EA72",
+    "local_source_inclusion": false
+  },
+  "pspdev": {
+    "image": "ghcr.io/pspdev/pspsdk@sha256:511bd8c9eaff77c8a2e205631ae060b9cdf0e9b7e61a7a6ef19482fb4affcdfa",
+    "platform": "linux/amd64",
+    "psp_gcc_version": "15.2.0"
+  },
+  "pspsdk": {
+    "license_copy": "vendor/pspsdk/LICENSE",
+    "installed_path_in_container": "/usr/local/pspdev/psp/sdk",
+    "version_pin": "immutable PSPDEV image digest above; standalone SDK revision not exposed by psp-config",
+    "reference_source_commit": "e2b2b313d4175823a263c2c6cf175311e824eb77",
+    "reference_source_archive_sha256": "6cca8e4bcc2378001e0050d60aa317f2747d241144004d8bb9f555d8db0630cc",
+    "reference_source_is_not_container_version": true
+  }
+}
