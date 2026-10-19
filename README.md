@@ -1,6 +1,6 @@
 # PlayAchievementsPortal
 
-**RetroAchievements on a real PSP — experimental online client, version 0.48 (hardware validation pending). PSP runtime behavior is unchanged from 0.47; this revision adds host heap measurements and regression tests. Version 0.46 hardware tests exposed a socket compatibility regression and a stalled DNS call; full HOME cleanup remains unconfirmed.**
+**RetroAchievements on a real PSP — experimental online client, version 0.49 (hardware validation pending). Adds persistent pending records, checked sleep recovery, specific error details and PBAD badges. The socket/DNS fixes and full HOME cleanup still need hardware validation.**
 
 [English](#english) · [Русский](#русский)
 
@@ -21,7 +21,7 @@ This is a focused hardware prototype, not a general-purpose PSP release. Develop
 | Verified official image hash | `199515744d49ef3620a5f9297c6116f9` |
 | Server set | 101 achievements loaded; one currently reported as unsupported |
 | Real online unlock | Achievement **397986, “Bu Bu Poruche”**, confirmed by the server in softcore on real hardware |
-| Menu and notifications | Tested on PSP; server progress, filters, stable menu and notification rendering |
+| Menu and notifications | Earlier UI tested on PSP; 0.49 badges/position/details have host coverage only |
 | Encore | Local replay of previously unlocked achievements tested on PSP |
 | Initial Wi-Fi recovery | Logs confirm a failed connection followed by an automatic successful retry |
 | Longer recovery scenarios | Implemented and tested with synthetic responses; extended hardware validation remains |
@@ -34,16 +34,17 @@ The 0.41 hardware logs show a successful RA login, the 101-entry catalog and rep
 - Server-confirmed progress, an achievement list, filters and status cards. A local trigger or a popup alone does not prove that the server accepted an unlock.
 - Separate network worker, certificate verification, bounded responses and queues, and memory-range checks.
 - Wi-Fi reconnect and retries for temporary login/set-loading failures. Startup retries use delays of 1, 2, 4, 8, 16, 32 and then 60 seconds. Achievement submissions use the official engine's retry scheduling.
-- During an ordinary Wi-Fi outage, the loaded RA client and pending unlocks remain in memory. The pending queue is **not saved across game exit, reboot or power loss**.
+- Softcore pending submissions are also saved by the worker in two authenticated `pending-*.raq` files, bound to the authenticated account, image hash and achievement definitions. On restart, the fresh server progress is loaded before replay. Up to 128 entries, maximum age seven days; changed token, damaged records, changed definitions and invalid timestamps are rejected and retained without overwriting. Nothing is imported from offline `.dat` files. A sudden power loss before the worker flush can lose the newest entries.
+- Restart replay is experimental: the [RA FAQ](https://docs.retroachievements.org/general/faq.html#can-i-earn-achievements-offline) only describes reconnecting while the emulator stays open. Storage and an HTTP response do not guarantee accepted credit; policy compatibility of restart replay remains unconfirmed.
 - Before the catalog is ready, the hotkey displays **ACHIEVEMENTS LOADING** without pausing the game. Once loaded, it opens the normal menu.
 
 There is no hardcore, leaderboard, multi-account, Vita/Adrenaline, PSP Go internal-storage or general multi-game support. Renaming an image or plugin entry does not make another region, revision, translation or mod compatible. Old offline `.dat` profiles are not uploaded to RA.
 
-Sleep/resume currently requests a safe client stop; automatic recovery after sleep is not implemented. The code has protected `module_stop` cleanup, but full completion during **HOME → Exit Game** is not yet proven. The current game-callback/frame binding is specific to LocoRoco and still marked `CANDIDATE` in diagnostics; broader timing and long-session validation remain necessary.
+Sleep disables evaluation immediately. After transport cancellation and resume, the worker checks the game map, original code bytes, official image hash and referenced memory. It rebases Delta values and resets condition/hit history without replaying missed frames; a long challenge may need to be restarted. A failed check stops the client. This recovery has host coverage but still needs PSP validation. Full cleanup during **HOME → Exit Game** is not yet proven. The LocoRoco game-callback/frame binding remains marked `CANDIDATE`; broader timing and long-session validation remain necessary.
 
 ### Build and install
 
-1. Build the online package using the commands below. The generated archive is `build/client-https/PSP_RA_HTTPS_v0.48.zip`; build outputs are not committed.
+1. Build the online package using the commands below. The generated archive is `build/client-https/PSP_RA_HTTPS_v0.49.zip`; build outputs are not committed.
 2. On the tested PSP configuration, enable ARK's **Use Extra Memory → +16 MiB** and create a working PSP Wi-Fi profile.
 3. For a fresh installation, copy the archive's `SEPLUGINS/RAClientLite/` directory to `ms0:/SEPLUGINS/RAClientLite/`. Set `profile.txt` to your actual saved Wi-Fi profile number. The packaged value is `1`.
 4. Register **only the bootstrap module**, restricted to the supported game, using the ARK plugin configuration:
@@ -86,9 +87,16 @@ Spectator does not load the account's server unlock history in this client. Enco
 | Up / Down | Select an achievement |
 | Left / Right | Change page |
 | Triangle | Filter: all / unconfirmed / confirmed |
+| Square | Service warning and connection reason/code; press again to return |
 | Circle | Close |
 
-The menu pauses the game callback and achievement evaluation while network work continues through `rc_client_idle`. Network status cards do not pause the game. **WI-FI CONNECTED** means that an IP was obtained; **RA SERVER REACHABLE** means a verified HTTPS/HTTP 200 response, not an achievement award. **CLIENT WARNING** is a service warning from the set, not an achievement.
+The menu pauses the game callback and achievement evaluation while network work continues through `rc_client_idle`. Cards appear at the **top right**. Errors show the Wi-Fi/APCTL, DNS, TCP, TLS/certificate, timeout, login, set, storage or resume reason and numeric code. **WI-FI CONNECTED** means an IP was obtained; **RA SERVER REACHABLE** means verified HTTPS/HTTP 200, not an award. **CLIENT WARNING** shows the actual service warning; Square opens its details.
+
+Badges reuse the original project's **PBAD v1** format. Put a prepared pack at `ms0:/SEPLUGINS/RAClientLite/badges/UCUS-98662.pbad`. Existing `tools/compile_badges.py` converts a local `achievementsets` JSON with BadgeName metadata into a pack (Python 3 + Pillow; it downloads artwork). This client accepts up to 128 badges, 263728 bytes, 32×32 RGB565, matched by achievement ID. The menu scales them to 14×14; popups use 32×32. Locked badges are grayscale. Missing artwork uses a placeholder; invalid/oversized packs report an error. Artwork and automatic PNG downloading are **not included in the ZIP**; without a prepared pack only placeholders appear.
+
+```sh
+python3 tools/compile_badges.py /absolute/private/sets.json UCUS-98662 build/UCUS-98662.pbad --cache-dir build/badge-cache
+```
 
 ### Development and diagnostics
 
@@ -116,7 +124,7 @@ Version 0.44 hardware logs now confirm exactly eight files after launch 5: match
 
 Version 0.47 corrects the socket compatibility regression: successful SO_NONBLOCK setup is required; its value/size readback is logged by SOCKET_MODE without rejecting PSP-specific results. Every send/recv retains `MSG_DONTWAIT`, linger is disabled and poll uses zero timeout plus yields of at most 50 ms. DNS runs in one temporary helper with module-owned buffers and an 8 KiB stack. Transport waits up to five seconds (or the remaining request deadline), then requests sceNetResolverStop and allows one second to confirm STOPPED plus completion before deleting the helper. Only after that can the existing retry use new resources. If completion is not confirmed, -35424 stops the client while retaining live resources; the helper is never forcibly killed. The 30-second request deadline and existing retry scheduling remain; retries use a fresh connection only after the old transport releases its resources. No thread is forcibly terminated and live buffers are never reassigned. This is not a hard deadline guarantee for arbitrary PSP/CFW calls: DNS, TLS computation or cleanup can still require hardware diagnosis.
 
-To test 0.48, install both PRX files together, keep your settings and logs, explicitly set `mode.txt` to `spectator` **and `encore.txt` to `0`**, restart the PSP and run the verified image three times. Encore=1 with spectator aborts startup with -35421 before notifications. Keep Wi-Fi on; allow up to three minutes per launch, record whether **ACHIEVEMENTS LOADED** appears and whether the game remains responsive, then exit through HOME. This three-minute observation window is not a client timeout or success guarantee. Save all eight logs after the third run; never include `auth.txt`. Spectator omits softcore `startsession`, so successful spectator runs alone do not establish that the softcore problem is fixed.
+To test 0.49, install both PRX files together, keep your settings and logs, explicitly set `mode.txt` to `spectator` **and `encore.txt` to `0`**, restart the PSP and run the verified image three times. Encore=1 with spectator aborts startup with -35421 before notifications. Keep Wi-Fi on; allow up to three minutes per launch, record whether **ACHIEVEMENTS LOADED** appears and whether the game remains responsive, then exit through HOME. This three-minute observation window is not a client timeout or success guarantee. Save all eight logs after the third run; never include `auth.txt`. Spectator omits softcore `startsession`, so successful spectator runs alone do not establish that the softcore problem is fixed.
 
 `TRANSPORT_STATE` samples the network thread during startup every five seconds. `location=2*N+1` means a call was entered, `2*N` means it returned; N: 1 resolver create, 2 DNS lookup, 3 socket create, 4 socket setup, 5 connect, 6 connect error query, 7 TLS, 8 send, 9 recv, 10 poll/yield, 11 socket close, 12 resolver delete, 13 resolver Stop. This is the last recorded call, not a complete TLS stack trace. `actions` counts entries; `thread_query`, `status`, `wait_type`, `exit_status` distinguish a query failure or stopped/waiting/running thread. Fields are sampled independently. Frozen counters and an entered call help locate a stall; they do not establish its cause. SOCKET_MODE reports the setter/query results, raw value and returned size. DNS_STATE reports helper UID, completion and cancellation flags; DNS_RESULT reports elapsed time, resolver result and Stop attempts. Result -35425 means no result was collected. The Stop call itself has no proven hard deadline on the tested CFW; retained resources are not a completed cleanup.
 
@@ -168,7 +176,7 @@ PlayAchievementsPortal — экспериментальный онлайн-кл�
 | Проверенный официальный хеш образа | `199515744d49ef3620a5f9297c6116f9` |
 | Набор | Загружается 101 достижение; одно сейчас определяется как неподдерживаемое |
 | Онлайн-зачёт | Достижение **397986 «Bu Bu Poruche»** подтверждено сервером в softcore на настоящей PSP |
-| Интерфейс | Проверены список, серверный прогресс, фильтры, стабильные меню и уведомления |
+| Интерфейс | Предыдущий UI проверен на PSP; значки, позиция и подробности 0.49 пока проверены только на ПК |
 | Encore | Локальный повтор уже открытого достижения проверен на PSP |
 | Повтор первого подключения | Логи подтверждают успешное автоматическое подключение после неудачной попытки |
 | Другие сценарии восстановления | Реализованы и проверены на синтетических ответах; длительные проверки на PSP ещё нужны |
@@ -181,16 +189,17 @@ PlayAchievementsPortal — экспериментальный онлайн-кл�
 - Список использует серверный прогресс. Выполнение условия и появление карточки сами по себе не доказывают зачёт: необходимо подтверждение RA.
 - Сеть обслуживает отдельный поток. Есть проверка сертификатов, границ памяти, размеров ответов и очередей.
 - При временных ошибках повторяются подключение Wi-Fi, вход и загрузка набора. Задержки запуска: 1, 2, 4, 8, 16, 32 и далее 60 секунд. Для отправки достижений используется расписание повторов официального движка.
-- При обычном обрыве Wi-Fi текущая RA-сессия и ожидающие отправки остаются в памяти. Очередь **не сохраняется после выхода из игры, перезагрузки или выключения**.
+- Worker сохраняет pending softcore в двух файлах `pending-*.raq`, привязанных к подтверждённому аккаунту, хешу образа и определениям достижений. После перезапуска сначала загружается свежий прогресс сервера. Предел — 128 записей и семь дней; смена токена, повреждение, другие условия и некорректное время запрещают повтор и перезапись файлов. Старые `.dat` не импортируются. Выключение до записи worker может потерять последние события.
+- Повтор после перезапуска экспериментальный: [FAQ RA](https://docs.retroachievements.org/general/faq.html#can-i-earn-achievements-offline) описывает переподключение при открытом эмуляторе. Совместимость повтора после закрытия с правилами сервиса не подтверждена; сохранение и HTTP-ответ не гарантируют зачёт.
 - До готовности набора сочетание показывает **ACHIEVEMENTS LOADING**, без паузы игры. После загрузки открывается обычное меню.
 
 Не поддерживаются hardcore, таблицы рекордов, несколько аккаунтов, Vita/Adrenaline, внутреннее хранилище PSP Go и произвольные игры. Другой регион, ревизия, перевод или модификация требуют отдельной проверки; переименование файлов совместимость не добавляет. Старые офлайн-профили `.dat` не переносятся на сервер.
 
-Сон/пробуждение сейчас запрашивает безопасную остановку клиента; восстановление после сна не реализовано. Защитная очистка через `module_stop` есть, но её полное выполнение при **HOME → выход из игры** ещё не подтверждено. Привязка проверок к игровому callback предназначена для LocoRoco и остаётся помеченной `CANDIDATE` в диагностике; синхронизацию и долгую игру ещё нужно проверять.
+Сон немедленно запрещает оценку кадров. После отмены транспорта и пробуждения worker проверяет карту игры, исходные байты кода, официальный хеш образа и используемую память. Delta получает новую исходную точку, история условий и попаданий сбрасывается, пропущенные кадры не воспроизводятся; длительное испытание может потребовать начать заново. Отказ проверки останавливает клиент. Восстановление покрыто host-тестами, но ещё требует PSP. Полная очистка при **HOME → выход из игры** не подтверждена. Привязка игрового callback предназначена для LocoRoco и остаётся `CANDIDATE`; синхронизацию и долгую игру ещё нужно проверять.
 
 ### Сборка и установка
 
-1. Собери онлайн-клиент командами ниже. Архив появится в `build/client-https/PSP_RA_HTTPS_v0.48.zip`; готовые сборки в Git не добавляются. Поведение PSP-клиента в 0.48 сохранено от 0.47; добавлены host-замеры heap и регрессионные тесты, которые не входят в установочный пакет. 0.48 ещё не проверена на PSP. На PSP в 0.46 выявлены несовместимость проверки сокета и задержка DNS; полная очистка при HOME не подтверждена.
+1. Собери онлайн-клиент командами ниже. Архив появится в `build/client-https/PSP_RA_HTTPS_v0.49.zip`; готовые сборки в Git не добавляются. Добавлены очередь на карте, проверяемое восстановление после сна, причины ошибок и PBAD-значки. 0.49 ещё не проверена на PSP. На PSP в 0.46 выявлены несовместимость проверки сокета и задержка DNS; полная очистка при HOME не подтверждена.
 2. На проверенной конфигурации PSP включи в ARK **Use Extra Memory → +16 MiB** и создай рабочий профиль Wi-Fi.
 3. При первой установке скопируй папку `SEPLUGINS/RAClientLite/` из архива в `ms0:/SEPLUGINS/RAClientLite/`. В `profile.txt` укажи номер своего сохранённого профиля Wi-Fi. Значение в архиве — `1`.
 4. В настройках плагинов ARK добавь запись только для bootstrap и указанной игры:
@@ -235,7 +244,9 @@ PlayAchievementsPortal — экспериментальный онлайн-кл�
 | Triangle | Все / неподтверждённые / подтверждённые |
 | Circle | Закрыть меню |
 
-Меню приостанавливает игровой callback и оценку условий; сеть обслуживается через `rc_client_idle`. Сетевые карточки игру не останавливают. **WI-FI CONNECTED** означает получение IP, **RA SERVER REACHABLE** — проверенный HTTPS/HTTP 200, а не зачёт достижения. **CLIENT WARNING** — служебное предупреждение из набора, не достижение.
+Меню приостанавливает игровой callback и оценку условий; сеть обслуживается через `rc_client_idle`. Карточки находятся **справа сверху** и игру не останавливают. Ошибки показывают причину Wi-Fi/APCTL, DNS, TCP, TLS/сертификата, тайм-аута, входа, набора, карты памяти или пробуждения и числовой код. **WI-FI CONNECTED** означает получение IP, **RA SERVER REACHABLE** — проверенный HTTPS/HTTP 200, а не зачёт. **CLIENT WARNING** показывает текст служебного предупреждения. **Квадрат** открывает подробности предупреждения и соединения, повторное нажатие возвращает список.
+
+Значки используют исходный **PBAD v1**. Подготовленный пакет положи в `ms0:/SEPLUGINS/RAClientLite/badges/UCUS-98662.pbad`. Штатный `tools/compile_badges.py` создаёт его из локального JSON `achievementsets` с BadgeName (Python 3 + Pillow, изображения скачиваются). Онлайн-клиент принимает до 128 значков, 263728 байт, 32×32 RGB565 и сопоставляет их по ID достижения. В меню размер 14×14, в уведомлении 32×32; закрытые значки серые. При отсутствии изображения выводится заглушка, повреждённый/слишком большой пакет даёт ошибку. **В ZIP нет изображений и автоматического скачивания PNG: без подготовленного PBAD будут заглушки.**
 
 ### Разработка и диагностика
 
@@ -263,7 +274,7 @@ make online-test ingame-test public-check
 
 0.47 исправляет несовместимость проверки сокета: успешный SO_NONBLOCK обязателен, но прочитанные значение и размер записываются в SOCKET_MODE без отказа из-за отличий PSP. Каждый send/recv сохраняет `MSG_DONTWAIT`, linger выключен, poll вызывается с нулевым ожиданием и паузами до 50 мс. DNS выполняется в одном временном потоке с буферами внутри модуля и стеком 8 КиБ. Транспорт ждёт до пяти секунд (либо оставшегося срока запроса), затем запрашивает sceNetResolverStop и отводит секунду на подтверждение STOPPED и завершения перед удалением потока. Только после этого существующий повтор может использовать новые ресурсы. Если завершение не подтверждено, -35424 останавливает клиент с удержанием живых ресурсов; поток принудительно не уничтожается. Срок запроса 30 секунд и существующий повтор сохранены; новый запрос использует новое соединение только после освобождения ресурсов старого. Принудительного завершения потока и передачи занятых буферов нет. Это не гарантия жёсткого срока произвольных PSP/CFW-вызовов: DNS, вычисления TLS и очистка ещё могут потребовать диагностики на железе.
 
-Для проверки 0.48 замени оба PRX вместе, сохрани настройки и логи, явно запиши `spectator` в `mode.txt` **и `0` в `encore.txt`**, перезагрузи PSP и выполни три запуска проверенного образа. Encore=1 вместе со spectator останавливает запуск с -35421 до появления уведомлений. Wi-Fi не переключай; в каждом запуске наблюдай до трёх минут, отметь появление **ACHIEVEMENTS LOADED** и отзывчивость игры, затем выйди через HOME. Три минуты — окно наблюдения, а не тайм-аут клиента или гарантия успеха. После третьего запуска сохрани восемь логов, без `auth.txt`. В spectator нет softcore-запроса `startsession`: успех в spectator сам по себе не доказывает исправление проблемы softcore.
+Для проверки 0.49 замени оба PRX вместе, сохрани настройки и логи, явно запиши `spectator` в `mode.txt` **и `0` в `encore.txt`**, перезагрузи PSP и выполни три запуска проверенного образа. Encore=1 вместе со spectator останавливает запуск с -35421 до появления уведомлений. Wi-Fi не переключай; в каждом запуске наблюдай до трёх минут, отметь появление **ACHIEVEMENTS LOADED** и отзывчивость игры, затем выйди через HOME. Три минуты — окно наблюдения, а не тайм-аут клиента или гарантия успеха. После третьего запуска сохрани восемь логов, без `auth.txt`. В spectator нет softcore-запроса `startsession`: успех в spectator сам по себе не доказывает исправление проблемы softcore.
 
 `TRANSPORT_STATE` раз в пять секунд при запуске показывает сетевой поток. `location=2*N+1` — вход в вызов, `2*N` — возврат; N: 1 — создание resolver, 2 — DNS, 3 — создание сокета, 4 — настройка сокета, 5 — connect, 6 — проверка ошибки connect, 7 — TLS, 8 — send, 9 — recv, 10 — poll/пауза, 11 — close, 12 — удаление resolver, 13 — Stop resolver. Это последний отмеченный вызов, а не полный стек TLS. `actions` — счётчик входов; `thread_query`, `status`, `wait_type`, `exit_status` помогают отличить ошибку опроса, завершённый, ожидающий и выполняющийся поток. Поля считываются по отдельности. Неизменный счётчик и отметка входа локализуют остановку, но не доказывают причину. SOCKET_MODE показывает результаты установки/чтения, значение и размер. DNS_STATE показывает UID потока, флаги завершения и отмены; DNS_RESULT — длительность, результат resolver и попытки Stop. -35425 означает, что результат не получен. Жёсткий срок самого Stop на CFW владельца не доказан; удержание ресурсов не считается завершённой очисткой.
 

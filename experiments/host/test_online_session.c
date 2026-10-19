@@ -8,11 +8,13 @@
 static uint64_t clock_ms;
 static unsigned char memory[16];
 static unsigned memory_reads;
+static unsigned memory_fail;
 static uint64_t now(void* context) { (void)context; return clock_ms; }
 static uint32_t read_memory(uint32_t address, uint8_t* bytes, uint32_t size, void* context)
 {
     (void)context;
     ++memory_reads;
+    if(memory_fail)return 0;
     if (size != 1 || address >= sizeof(memory)) return 0;
     *bytes = memory[address]; return 1;
 }
@@ -73,6 +75,8 @@ static void scenario(unsigned which)
         unsigned i,found=0;
         assert(ra_session_prepare_ui(s,&ui));
         assert(ui.count==2 && ui.spectator==(unsigned)!online);
+        assert(!strcmp(ui.warning_title,"Warning") && !strcmp(ui.warning_description,"Synthetic warning"));
+        assert(!strcmp(ui.rows[0].badge_name,"00000"));
         for(i=0;i<ui.count;++i) {
             assert(ui.rows[i].id<101000001u && ui.rows[i].title[0]);
             if(ui.rows[i].id==1) {
@@ -422,6 +426,95 @@ static void hash_selects_set(void)
     assert(ra_session_close(s));
     puts("PASS hash selection: distinct hashes request distinct server sets over HTTPS; unknown hash cannot reuse the preceding catalog; spectator only");
 }
+static ra_client_session* pending_session_with_game(int enabled,int known,const char* payload)
+{
+    const ra_session_config config={NULL,now,read_memory,NULL,NULL};
+    ra_client_session* s=ra_session_create(&config);
+    memset(memory,0,sizeof(memory));
+    assert(s && ra_session_enable_online_softcore(s));
+    if(enabled)assert(ra_session_pending_enable(s,100000));
+    assert(ra_session_login_token(s,"fixture","synthetic-test-only"));reply(s,"r=login2&",200,login);
+    assert(ra_session_load_game(s,"0123456789abcdef0123456789abcdef"));reply(s,"r=achievementsets&",200,payload);
+    reply(s,"r=startsession&",200,known?
+        "{\"Success\":true,\"Unlocks\":[{\"ID\":1,\"When\":1}],\"HardcoreUnlocks\":[]}":
+        "{\"Success\":true,\"Unlocks\":[],\"HardcoreUnlocks\":[]}");
+    return s;
+}
+static ra_client_session* pending_session(int enabled,int known)
+{ return pending_session_with_game(enabled,known,game); }
+static void persistent_pending(void)
+{
+    ra_pending saved,other,current;
+    ra_session_request request;ra_session_stats stats;
+    ra_client_session* s=pending_session(1,0);
+    tick(s,1);memory[0]=1;tick(s,1);
+    assert(ra_session_pending_snapshot(s,&saved) && saved.count==1 && saved.entry[0].native);
+    assert(ra_session_close(s));
+    s=pending_session(1,0);
+    other=saved;strcpy(other.account,"other");assert(!ra_session_pending_restore(s,&other,100001));
+    other=saved;other.hash[0]='f';assert(!ra_session_pending_restore(s,&other,100001));
+    other=saved;other.game_id=2;assert(!ra_session_pending_restore(s,&other,100001));
+    other=saved;other.entry[0].earned=200000;assert(!ra_session_pending_restore(s,&other,100001));
+    other=saved;other.entry[0].id=999;assert(!ra_session_pending_restore(s,&other,100001));
+    other=saved;other.entry[0].definition[0]^=1;assert(!ra_session_pending_restore(s,&other,100001));
+    other=saved;other.entry[1]=other.entry[0];other.count=2;assert(!ra_session_pending_restore(s,&other,100001));
+    other=saved;other.generation=UINT32_MAX-2;assert(!ra_session_pending_restore(s,&other,100001));
+    assert(ra_session_pending_restore(s,&saved,100001));
+    tick(s,0);assert(ra_session_take_request(s,&request));
+    assert(request.kind==RA_REQUEST_AWARD && strstr(request.post_data,"&a=1&") && strstr(request.post_data,"&h=0&"));
+    tick(s,1);memory[0]=1;tick(s,1); /* Same condition cannot create a second restored award. */
+    ra_session_get_stats(s,&stats);assert(stats.award_requests==1 && stats.pending==1 && !stats.earned_events);
+    assert(ra_session_complete(s,request.ticket,RA_SESSION_RETRYABLE,NULL,0));tick(s,0);
+    clock_ms+=1000;tick(s,0);assert(ra_session_take_request(s,&request));
+    assert(ra_session_complete(s,request.ticket,200,"{",1));tick(s,0);
+    assert(ra_session_pending_snapshot(s,&current) && current.count==1);
+    clock_ms+=2000;tick(s,0);assert(ra_session_take_request(s,&request));
+    assert(ra_session_complete(s,request.ticket,200,"{\"Success\":true,\"AchievementID\":1}",34));tick(s,0);
+    ra_session_get_stats(s,&stats);assert(stats.award_confirmed==1 && stats.unlocked==1);
+    assert(ra_session_pending_snapshot(s,&current) && !current.count);assert(ra_session_close(s));
+    s=pending_session(1,1);assert(ra_session_pending_restore(s,&saved,100001));
+    assert(ra_session_pending_snapshot(s,&current) && !current.count);
+    tick(s,0);assert(!ra_session_take_request(s,&request));assert(ra_session_close(s));
+    s=pending_session(1,0);assert(ra_session_pending_restore(s,&saved,100001));
+    tick(s,0);reply(s,"r=awardachievement&",403,"{\"Success\":false,\"Error\":\"Synthetic rejection\"}");
+    assert(ra_session_pending_snapshot(s,&current) && !current.count);
+    ra_session_get_stats(s,&stats);assert(!stats.award_confirmed && stats.server_errors==1);
+    assert(ra_session_close(s));
+    puts("PASS persisted pending: native condition only, fresh account/hash/set/time checks, server unlock reconciliation, no duplicate, transient retry and real ACK");
+}
+static void resume_history(void)
+{
+    ra_client_session* s=pending_session(0,0);ra_session_stats stats;
+    tick(s,1);memory[0]=1;
+    assert(ra_session_resume(s));tick(s,1);
+    ra_session_get_stats(s,&stats);assert(!stats.earned_events && !stats.award_requests);
+    memory_fail=1;assert(!ra_session_resume(s));memory_fail=0;
+    memory[0]=0;tick(s,1);memory[0]=1;tick(s,1);
+    ra_session_get_stats(s,&stats);assert(stats.earned_events==1 && stats.pending==1);
+    assert(ra_session_resume(s));
+    reply(s,"r=awardachievement&",200,"{\"Success\":true,\"AchievementID\":1}");
+    ra_session_get_stats(s,&stats);assert(stats.award_confirmed==1 && stats.earned_events==1);
+    assert(ra_session_close(s));
+    puts("PASS resume: memory reread failure rejected, Delta rebased without catch-up or false trigger, fresh false/true required, in-session pending preserved");
+}
+static void resume_hits(void)
+{
+    const char* original="0xH000000=1_d0xH000000=0";
+    const char* start=strstr(game,original);
+    char payload[sizeof(game)+32];ra_session_stats stats;ra_client_session* s;
+    assert(start);
+    snprintf(payload,sizeof(payload),"%.*s0xH000000=1.3.%s",(int)(start-game),game,start+strlen(original));
+    s=pending_session_with_game(0,0,payload);
+    tick(s,1);memory[0]=1;tick(s,1);tick(s,1);
+    ra_session_get_stats(s,&stats);assert(!stats.earned_events && stats.frame_calls==3);
+    assert(ra_session_resume(s));
+    ra_session_get_stats(s,&stats);assert(stats.frame_calls==3); /* no synthetic frame on resume */
+    memory[0]=0;tick(s,1);memory[0]=1;tick(s,1);tick(s,1);
+    ra_session_get_stats(s,&stats);assert(!stats.earned_events);
+    tick(s,1);ra_session_get_stats(s,&stats);assert(stats.earned_events==1);
+    assert(ra_session_close(s));
+    puts("PASS resume hit history: old two-of-three hits discarded, no frame catch-up, false and three fresh hits required");
+}
 int main(void)
 {
     unsigned i;
@@ -431,6 +524,7 @@ int main(void)
     recover_startup();trace_load_timeout();recover_award();full_offline_queue();
     diagnostic_limits();
     hash_selects_set();
+    persistent_pending();resume_history();resume_hits();
     puts("PASS native diagnostics: cached Delta without extra reads, idle preserves history, bounded ring/conditions/refs, warning excluded from earned/awards");
     puts("PASS online softcore: server unlocks, Delta history, idle, award/ack, rejection, retry, spectator, no duplicate award; synthetic server only");
     return 0;

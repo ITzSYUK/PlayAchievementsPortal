@@ -6,28 +6,50 @@ CFLAGS ?= -O2 -g -std=c99 -Wall -Wextra -Werror
 CPPFLAGS += $(RC_DEFINES) -D_GNU_SOURCE -D_FILE_OFFSET_BITS=64 $(RC_INCLUDES) -I../../online/include -I../common
 LDLIBS += -lm
 RC_OBJECTS = $(patsubst $(RC_ROOT)/%.c,$(BUILD)/rcheevos/%.o,$(RC_SOURCES))
-LOCAL_OBJECTS = $(BUILD)/ra_psp_memory.o $(BUILD)/ra_psp_hash.o $(BUILD)/offline_probe.o $(BUILD)/offline_main.o $(BUILD)/hash_probe.o $(BUILD)/probe_log.o $(BUILD)/test_probe_log.o $(BUILD)/ra_client_session.o $(BUILD)/test_client_session.o
+LOCAL_OBJECTS = $(BUILD)/ra_pending.o $(BUILD)/ra_psp_memory.o $(BUILD)/ra_psp_hash.o $(BUILD)/offline_probe.o $(BUILD)/offline_main.o $(BUILD)/hash_probe.o $(BUILD)/probe_log.o $(BUILD)/test_probe_log.o $(BUILD)/ra_client_session.o $(BUILD)/test_client_session.o
 
 .PHONY: all test
+all: $(BUILD)/test_resume_owner
+$(BUILD)/test_resume_owner: test_resume_owner.c ../psp/ingame/https/user/resume_owner.h ../../online/src/ra_game_memory.c ../../online/src/ra_psp_memory.c | $(BUILD)
+	$(CC) $(CPPFLAGS) $(CFLAGS) test_resume_owner.c ../../online/src/ra_game_memory.c ../../online/src/ra_psp_memory.c -o $@
+test: resume-test
+.PHONY: resume-test
+resume-test: $(BUILD)/test_resume_owner
+	$(BUILD)/test_resume_owner
+all: $(BUILD)/test_pending_store
+all: $(BUILD)/test_badge
+$(BUILD)/test_badge: test_badge.c ../../online/src/ra_badge.c ../../online/include/ra_badge.h | $(BUILD)
+	$(CC) $(CPPFLAGS) $(CFLAGS) test_badge.c ../../online/src/ra_badge.c -o $@
+test: badge-test
+.PHONY: badge-test
+badge-test: $(BUILD)/test_badge
+	$(BUILD)/test_badge
+	$(PYTHON) test_badge_compiler.py $(BUILD)/test_badge
+$(BUILD)/test_pending_store: test_pending_store.c ../../online/src/ra_pending.c ../../online/include/ra_pending.h ../psp/ingame/https/user/pending_store.h | $(BUILD)
+	$(CC) $(CPPFLAGS) $(CFLAGS) -I../../vendor/mbedtls/include -I../../vendor/mbedtls/library -I../tls -DMBEDTLS_CONFIG_FILE=\"compact_tls_config.h\" test_pending_store.c ../../online/src/ra_pending.c ../../vendor/mbedtls/library/sha256.c ../../vendor/mbedtls/library/platform_util.c ../../vendor/mbedtls/library/platform.c -o $@
+test: pending-store-test
+.PHONY: pending-store-test
+pending-store-test: $(BUILD)/test_pending_store
+	$(BUILD)/test_pending_store
 all: $(BUILD)/test_ui
-$(BUILD)/test_ui: test_ui.c ../../online/src/ra_ui.c ../../online/src/ra_ui_draw.c ../../online/include/ra_ui.h
+$(BUILD)/test_ui: test_ui.c ../../online/src/ra_ui.c ../../online/src/ra_ui_draw.c ../../online/include/ra_ui.h ../../online/include/ra_https.h
 	$(CC) $(CPPFLAGS) $(CFLAGS) test_ui.c ../../online/src/ra_ui.c ../../online/src/ra_ui_draw.c -pthread $(LDFLAGS) -o $@
 test: ui-test
 .PHONY: ui-test
 ui-test: $(BUILD)/test_ui
 	$(BUILD)/test_ui
 all: $(BUILD)/test_session_mailbox
-$(BUILD)/test_session_mailbox: test_session_mailbox.c ../ingame/session_mailbox.h ../../online/src/ra_client_session.c ../../online/include/ra_client_session.h $(BUILD)/librcheevos.a
-	$(CC) $(CPPFLAGS) -I../ingame $(CFLAGS) -DRA_SESSION_ONLINE test_session_mailbox.c ../../online/src/ra_client_session.c $(BUILD)/librcheevos.a -pthread $(LDFLAGS) $(LDLIBS) -o $@
+$(BUILD)/test_session_mailbox: test_session_mailbox.c ../ingame/session_mailbox.h ../../online/src/ra_client_session.c ../../online/src/ra_pending.c ../../online/include/ra_client_session.h $(BUILD)/librcheevos.a
+	$(CC) $(CPPFLAGS) -I../ingame $(CFLAGS) -DRA_SESSION_ONLINE test_session_mailbox.c ../../online/src/ra_client_session.c ../../online/src/ra_pending.c $(BUILD)/librcheevos.a -pthread $(LDFLAGS) $(LDLIBS) -o $@
 all: $(BUILD)/test_online_session
-$(BUILD)/test_online_session: test_online_session.c ../../online/src/ra_client_session.c ../../online/include/ra_client_session.h $(BUILD)/librcheevos.a
-	$(CC) $(CPPFLAGS) $(CFLAGS) -DRA_SESSION_ONLINE test_online_session.c ../../online/src/ra_client_session.c $(BUILD)/librcheevos.a $(LDFLAGS) $(LDLIBS) -o $@
+$(BUILD)/test_online_session: test_online_session.c ../../online/src/ra_client_session.c ../../online/src/ra_pending.c ../../online/include/ra_client_session.h $(BUILD)/librcheevos.a
+	$(CC) $(CPPFLAGS) $(CFLAGS) -DRA_SESSION_ONLINE test_online_session.c ../../online/src/ra_client_session.c ../../online/src/ra_pending.c $(BUILD)/librcheevos.a $(LDFLAGS) $(LDLIBS) -o $@
 all: $(BUILD)/test_rcheevos_regressions $(BUILD)/client_memory_bench
 $(BUILD)/test_rcheevos_regressions: test_rcheevos_regressions.c $(BUILD)/librcheevos.a
 	$(CC) $(CPPFLAGS) $(CFLAGS) $< $(BUILD)/librcheevos.a $(LDFLAGS) $(LDLIBS) -o $@
 
-$(BUILD)/client_memory_bench: client_memory_bench.c ../../online/src/ra_client_session.c ../../online/include/ra_client_session.h $(BUILD)/librcheevos.a
-	$(CC) $(CPPFLAGS) $(CFLAGS) -fno-builtin-malloc -fno-builtin-calloc -fno-builtin-realloc -fno-builtin-free client_memory_bench.c ../../online/src/ra_client_session.c $(BUILD)/librcheevos.a $(LDFLAGS) $(LDLIBS) -Wl,--wrap=malloc,--wrap=calloc,--wrap=realloc,--wrap=free,--wrap=strdup -o $@
+$(BUILD)/client_memory_bench: client_memory_bench.c ../../online/src/ra_client_session.c ../../online/src/ra_pending.c ../../online/include/ra_client_session.h $(BUILD)/librcheevos.a
+	$(CC) $(CPPFLAGS) $(CFLAGS) -fno-builtin-malloc -fno-builtin-calloc -fno-builtin-realloc -fno-builtin-free client_memory_bench.c ../../online/src/ra_client_session.c ../../online/src/ra_pending.c $(BUILD)/librcheevos.a $(LDFLAGS) $(LDLIBS) -Wl,--wrap=malloc,--wrap=calloc,--wrap=realloc,--wrap=free,--wrap=strdup -o $@
 
 .PHONY: memory-bench
 memory-bench: $(BUILD)/client_memory_bench
@@ -45,6 +67,9 @@ $(BUILD)/librcheevos.a: $(RC_OBJECTS)
 	$(AR) rcs $@ $^
 
 $(BUILD)/ra_psp_%.o: ../../online/src/ra_psp_%.c | $(BUILD)
+	$(CC) $(CPPFLAGS) $(CFLAGS) -MMD -MP -c $< -o $@
+
+$(BUILD)/ra_pending.o: ../../online/src/ra_pending.c ../../online/include/ra_pending.h | $(BUILD)
 	$(CC) $(CPPFLAGS) $(CFLAGS) -MMD -MP -c $< -o $@
 
 $(BUILD)/ra_client_session.o: ../../online/src/ra_client_session.c ../../online/include/ra_client_session.h | $(BUILD)
@@ -71,26 +96,26 @@ $(BUILD)/hash_probe: $(BUILD)/hash_probe.o $(BUILD)/ra_psp_hash.o $(BUILD)/librc
 $(BUILD)/test_probe_log: $(BUILD)/test_probe_log.o $(BUILD)/probe_log.o
 	$(CC) $(CFLAGS) $^ $(LDFLAGS) -o $@
 
-$(BUILD)/test_client_session: $(BUILD)/test_client_session.o $(BUILD)/ra_client_session.o $(BUILD)/librcheevos.a
+$(BUILD)/test_client_session: $(BUILD)/test_client_session.o $(BUILD)/ra_client_session.o $(BUILD)/ra_pending.o $(BUILD)/librcheevos.a
 	$(CC) $(CFLAGS) $^ $(LDFLAGS) $(LDLIBS) -pthread -o $@
 
 $(BUILD)/test_auth_file: test_auth_file.c ../../online/src/ra_auth_file.c ../../online/include/ra_auth_file.h | $(BUILD)
 	$(CC) $(CPPFLAGS) $(CFLAGS) test_auth_file.c ../../online/src/ra_auth_file.c $(LDFLAGS) -o $@
 
-$(BUILD)/test_client_session_noframes: test_client_session.c ../../online/src/ra_client_session.c ../../online/include/ra_client_session.h $(BUILD)/librcheevos.a
-	$(CC) $(CPPFLAGS) $(CFLAGS) -DRA_SESSION_NO_FRAMES test_client_session.c ../../online/src/ra_client_session.c $(BUILD)/librcheevos.a $(LDFLAGS) $(LDLIBS) -pthread -o $@
+$(BUILD)/test_client_session_noframes: test_client_session.c ../../online/src/ra_client_session.c ../../online/src/ra_pending.c ../../online/include/ra_client_session.h $(BUILD)/librcheevos.a
+	$(CC) $(CPPFLAGS) $(CFLAGS) -DRA_SESSION_NO_FRAMES test_client_session.c ../../online/src/ra_client_session.c ../../online/src/ra_pending.c $(BUILD)/librcheevos.a $(LDFLAGS) $(LDLIBS) -pthread -o $@
 
-$(BUILD)/test_large_session: test_large_session.c ../../online/src/ra_client_session.c ../../online/include/ra_client_session.h ../../online/include/ra_response_limits.h $(BUILD)/librcheevos.a
-	$(CC) $(CPPFLAGS) $(CFLAGS) -DRA_SESSION_NO_FRAMES test_large_session.c ../../online/src/ra_client_session.c $(BUILD)/librcheevos.a $(LDFLAGS) $(LDLIBS) -Wl,--wrap=malloc,--wrap=free -o $@
+$(BUILD)/test_large_session: test_large_session.c ../../online/src/ra_client_session.c ../../online/src/ra_pending.c ../../online/include/ra_client_session.h ../../online/include/ra_response_limits.h $(BUILD)/librcheevos.a
+	$(CC) $(CPPFLAGS) $(CFLAGS) -DRA_SESSION_NO_FRAMES test_large_session.c ../../online/src/ra_client_session.c ../../online/src/ra_pending.c $(BUILD)/librcheevos.a $(LDFLAGS) $(LDLIBS) -Wl,--wrap=malloc,--wrap=free -o $@
 
-$(BUILD)/test_game_session: test_game_session.c ../../online/src/ra_client_session.c ../../online/src/ra_game_memory.c ../../online/src/ra_psp_memory.c ../../online/include/ra_game_memory.h ../../online/include/ra_client_session.h $(BUILD)/librcheevos.a
-	$(CC) $(CPPFLAGS) $(CFLAGS) -DRA_SESSION_NO_FRAMES test_game_session.c ../../online/src/ra_client_session.c ../../online/src/ra_game_memory.c ../../online/src/ra_psp_memory.c $(BUILD)/librcheevos.a $(LDFLAGS) $(LDLIBS) -o $@
+$(BUILD)/test_game_session: test_game_session.c ../../online/src/ra_client_session.c ../../online/src/ra_pending.c ../../online/src/ra_game_memory.c ../../online/src/ra_psp_memory.c ../../online/include/ra_game_memory.h ../../online/include/ra_client_session.h $(BUILD)/librcheevos.a
+	$(CC) $(CPPFLAGS) $(CFLAGS) -DRA_SESSION_NO_FRAMES test_game_session.c ../../online/src/ra_client_session.c ../../online/src/ra_pending.c ../../online/src/ra_game_memory.c ../../online/src/ra_psp_memory.c $(BUILD)/librcheevos.a $(LDFLAGS) $(LDLIBS) -o $@
 
 $(BUILD)/test_state_test: test_state_test.c ../../online/src/ra_state_test.c ../../online/include/ra_state_test.h $(BUILD)/librcheevos.a
 	$(CC) $(CPPFLAGS) $(CFLAGS) test_state_test.c ../../online/src/ra_state_test.c $(BUILD)/librcheevos.a $(LDFLAGS) $(LDLIBS) -o $@
 
-$(BUILD)/test_target_session: test_game_session.c ../../online/src/ra_client_session.c ../../online/src/ra_state_test.c ../../online/src/ra_game_memory.c ../../online/src/ra_psp_memory.c ../../online/include/ra_state_test.h ../../online/include/ra_client_session.h $(BUILD)/librcheevos.a
-	$(CC) $(CPPFLAGS) -I$(RC_ROOT)/src $(CFLAGS) -DRA_SESSION_NO_FRAMES -DRA_SESSION_STATE_TEST test_game_session.c ../../online/src/ra_client_session.c ../../online/src/ra_state_test.c ../../online/src/ra_game_memory.c ../../online/src/ra_psp_memory.c $(BUILD)/librcheevos.a $(LDFLAGS) $(LDLIBS) -o $@
+$(BUILD)/test_target_session: test_game_session.c ../../online/src/ra_client_session.c ../../online/src/ra_pending.c ../../online/src/ra_state_test.c ../../online/src/ra_game_memory.c ../../online/src/ra_psp_memory.c ../../online/include/ra_state_test.h ../../online/include/ra_client_session.h $(BUILD)/librcheevos.a
+	$(CC) $(CPPFLAGS) -I$(RC_ROOT)/src $(CFLAGS) -DRA_SESSION_NO_FRAMES -DRA_SESSION_STATE_TEST test_game_session.c ../../online/src/ra_client_session.c ../../online/src/ra_pending.c ../../online/src/ra_state_test.c ../../online/src/ra_game_memory.c ../../online/src/ra_psp_memory.c $(BUILD)/librcheevos.a $(LDFLAGS) $(LDLIBS) -o $@
 
 test: all
 	$(BUILD)/test_rcheevos_regressions

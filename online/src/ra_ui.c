@@ -1,4 +1,5 @@
 #include "ra_ui.h"
+#include "ra_https.h"
 #include "ra_client_session.h"
 #include <string.h>
 void ra_ui_init(ra_ui* ui, unsigned spectator)
@@ -55,4 +56,27 @@ const char* ra_ui_label(unsigned state)
     case RA_UI_UNSUPPORTED:return "UNSUPPORTED";
     default:return "LOCKED";
     }
+}
+const char* ra_ui_reason(unsigned reason)
+{
+    static const char* const labels[]={"", "WI-FI SWITCH IS OFF", "WI-FI PROFILE / ACCESS POINT",
+        "DNS LOOKUP FAILED", "CANNOT CONNECT TO RA", "TLS HANDSHAKE FAILED",
+        "CERTIFICATE / CLOCK CHECK FAILED", "REQUEST TIMED OUT", "LOGIN / TOKEN REJECTED",
+        "OFFICIAL SET LOAD FAILED", "GAME MEMORY CHECK FAILED", "MEMORY STICK WRITE FAILED",
+        "RESUME CHECK FAILED", "BADGE PACK INVALID / NO MEMORY", "SAVED QUEUE VALIDATION FAILED",
+        "HTTP RESPONSE INVALID / INCOMPLETE"};
+    return reason<sizeof(labels)/sizeof(labels[0])?labels[reason]:"UNKNOWN CONNECTION ERROR";
+}
+unsigned ra_ui_transport_reason(int code,int status,int dns,const char* stage,uint32_t verify,unsigned kind)
+{
+    if(verify || (stage && !strcmp(stage,"CA_parse")))return RA_REASON_CERTIFICATE;
+    if(code==RA_HTTPS_TIMEOUT)return RA_REASON_TIMEOUT;
+    if(!code && status>=400)return kind==RA_REQUEST_LOGIN?RA_REASON_AUTH:
+        kind==RA_REQUEST_SET || kind==RA_REQUEST_START?RA_REASON_SET:RA_REASON_CONNECT;
+    if(code==RA_HTTPS_LIMIT || code==RA_HTTPS_FRAMING || code==RA_HTTPS_ENCODING || code==RA_HTTPS_TRUNCATED)
+        return RA_REASON_RESPONSE;
+    if(stage && (!strcmp(stage,"DNS_TCP") || !strcmp(stage,"socket_setup")))
+        return dns<0 && dns!=-35425?RA_REASON_DNS:RA_REASON_CONNECT;
+    if(stage && (!strcmp(stage,"HTTP_send") || !strcmp(stage,"HTTP_body")))return RA_REASON_RESPONSE;
+    return RA_REASON_TLS;
 }

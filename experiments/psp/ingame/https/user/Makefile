@@ -11,6 +11,8 @@ else
 OBJS = main.o ra_https.o ra_http_body.o ra_net_resources.o ra_client_session.o ra_state_test.o ra_auth_file.o ra_game_memory.o ra_psp_memory.o frame_observation.o frame_candidate.o rtc_epoch.o probe_log.o kernel_format.o probe_power.o md5.o rc_api_runtime.o rc_api_common.o rc_compat.o rc_util.o $(TLS_OBJS)
 OBJS += $(notdir $(RC_SOURCES:.c=.o))
 OBJS += ra_ui.o ra_ui_draw.o
+OBJS += ra_badge.o
+OBJS += ra_pending.o
 endif
 VPATH = ../../../../../online/src ../../../../common ../../../../tls ../../../../ingame $(RC_ROOT)/src/rapi $(RC_ROOT)/src $(RC_ROOT)/src/rhash $(RC_ROOT)/src/rcheevos
 INCDIR = ../../../../../online/include ../../../../common ../../../../tls ../../../../ingame $(RC_ROOT)/include $(RC_ROOT)/src $(RC_ROOT)/src/rhash $(TLS_ROOT)/include $(TLS_ROOT)/library
@@ -47,8 +49,12 @@ main.o: socket_io.h
 main.o: dns_job.h
 main.o: ../../../../ingame/log_lifecycle.h
 main.o: online_ui.h ../../../../../online/include/ra_ui.h
+main.o: pending_store.h resume_owner.h
+main.o ra_pending.o ra_client_session.o: ../../../../../online/include/ra_pending.h
+main.o ra_badge.o: ../../../../../online/include/ra_badge.h
 main.o: ../../../../ingame/ui_pause.h ../../../../ingame/ui_display.h
 ra_ui.o ra_ui_draw.o ra_client_session.o: ../../../../../online/include/ra_ui.h
+ra_ui.o: ../../../../../online/include/ra_https.h ../../../../../online/include/ra_response_limits.h
 # Historical probe helpers share this source with the online worker.
 # Unused experiments are removed by --gc-sections.
 main.o: CFLAGS += -Wno-unused-function -Wno-unused-variable -Wno-unused-const-variable

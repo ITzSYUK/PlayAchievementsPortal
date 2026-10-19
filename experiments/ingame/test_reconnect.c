@@ -53,6 +53,8 @@ static int start_apctl_events(void){return 0;}
 static int record(const char* label,int rc){assert(label);++logs;return rc;}
 static void ra_probe_log_printf(void* unused,const char* format,...){(void)unused;assert(format);++logs;}
 static void ui_network_notice(unsigned type,unsigned delay){assert(type>=7 && type<=9);assert(delay<=60000);++notices;}
+static void ui_network_error(unsigned type,unsigned delay,unsigned reason,int code)
+{ assert(type==8 && reason);(void)code;ui_network_notice(type,delay); }
 #include "../psp/ingame/https/user/reconnect.h"
 int main(void)
 {

@@ -1,11 +1,13 @@
 #include "ra_ui.h"
 #include "ra_client_session.h"
+#include "ra_https.h"
 #include <assert.h>
 #include <pthread.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 static ra_ui ui;
+static uint16_t badge_pixels[32*32];
 static void* producer(void* unused)
 {
     unsigned i;(void)unused;
@@ -25,11 +27,25 @@ static void draw_test(void)
         ra_ui_notice notice={RA_SESSION_EVENT_CONFIRMED,1,0};
         assert(bytes);memset(bytes,0xa5,size+128);
         for(menu=0;menu<2;++menu)ra_ui_draw(&ui,&s,(int)menu,0,999,&notice);
-        for(notice.type=7;notice.type<=14;++notice.type) {
+        for(notice.type=7;notice.type<=16;++notice.type) {
             memset(bytes,0xa5,size+128);notice.id=60;
             ra_ui_draw(&ui,&s,0,0,0,&notice);
             for(i=0;i<64;++i)assert(bytes[i]==0xa5 && bytes[size+64+i]==0xa5);
+            for(i=0;i<272*512;++i) {
+                unsigned x=i%512,y=i/512;
+                if(x<RA_NOTICE_X || x>=RA_NOTICE_X+RA_NOTICE_WIDTH || y<RA_NOTICE_Y || y>=RA_NOTICE_Y+RA_NOTICE_HEIGHT) {
+                    if(format==3)assert(((uint32_t*)(bytes+64))[i]==0xa5a5a5a5u);
+                    else assert(((uint16_t*)(bytes+64))[i]==0xa5a5u);
+                }
+            }
         }
+        ui.details=1;ra_ui_draw(&ui,&s,1,0,0,NULL);ui.details=0;
+        notice.type=RA_SESSION_EVENT_CONFIRMED;notice.id=1;
+        memset(bytes,0xa5,size+128);ra_ui_draw(&ui,&s,0,0,0,&notice);
+        /* Top-left badge sample is pure red, including all PSP pixel formats. */
+        i=(RA_NOTICE_Y+18)*512+123;
+        if(format==3)assert(((uint32_t*)(bytes+64))[i]==0xff0000ffu);
+        else assert(((uint16_t*)(bytes+64))[i]==(format==0?0x001f:format==1?0x801f:0xf00f));
         {
             uint16_t* tile=malloc(RA_NOTICE_WIDTH*RA_NOTICE_HEIGHT*2);
             assert(tile);for(i=0;i<RA_NOTICE_WIDTH*RA_NOTICE_HEIGHT;++i)tile[i]=0xffff;
@@ -66,6 +82,14 @@ static void screenshot(const char* path,int menu)
 int main(int argc,char** argv)
 {
     ra_ui_notice out;unsigned i;pthread_t thread;
+    assert(ra_ui_transport_reason(0,401,0,"complete",0,RA_REQUEST_LOGIN)==RA_REASON_AUTH);
+    assert(ra_ui_transport_reason(0,503,0,"complete",0,RA_REQUEST_SET)==RA_REASON_SET);
+    assert(ra_ui_transport_reason(-1,0,-35425,"socket_setup",0,0)==RA_REASON_CONNECT);
+    assert(ra_ui_transport_reason(-1,0,-9,"DNS_TCP",0,0)==RA_REASON_DNS);
+    assert(ra_ui_transport_reason(-1,0,0,"TLS_handshake",8,0)==RA_REASON_CERTIFICATE);
+    assert(ra_ui_transport_reason(-1,0,-35425,"TLS_handshake",0,0)==RA_REASON_TLS);
+    assert(ra_ui_transport_reason(RA_HTTPS_TIMEOUT,0,0,"HTTP_body",0,0)==RA_REASON_TIMEOUT);
+    assert(ra_ui_transport_reason(RA_HTTPS_TRUNCATED,0,0,"HTTP_body",0,0)==RA_REASON_RESPONSE);
     ra_ui_init(&ui,0);ui.count=3;
     for(i=0;i<ui.count;++i)ui.rows[i].id=i+1;
     ui.rows[2].state=RA_UI_UNSUPPORTED;
@@ -100,10 +124,15 @@ int main(int argc,char** argv)
     strcpy(ui.rows[0].title,"Bu Bu Poruche");
     strcpy(ui.rows[0].description,"Clear the stage. Official achievement description from the server.");
     strcpy(ui.rows[1].title,"A second achievement");strcpy(ui.rows[2].title,"Unsupported condition");
+    for(i=0;i<32*32;++i)badge_pixels[i]=(i%32<16?(i/32<16?0x001f:0x07e0):(i/32<16?0xf800:0xffff));
+    ui.rows[0].badge=badge_pixels;
+    strcpy(ui.warning_title,"Synthetic service warning");
+    strcpy(ui.warning_description,"Some achievements require a fresh run. Read this warning before continuing.");
+    ui.reason=RA_REASON_CERTIFICATE;ui.error_code=-0x2700;
     draw_test();
     ui.spectator=0;ui.rows[0].state=RA_UI_CONFIRMED;ui.rows[0].points=5;ui.rows[1].state=RA_UI_PENDING;
     if(argc>1)screenshot(argv[1],1);
     if(argc>2)screenshot(argv[2],0);
-    puts("PASS UI: server/local/pending/rejected distinction, filters, overflow preserves ack, 50000 concurrent publications, four framebuffer formats with guards");
+    puts("PASS UI: server/local/pending/rejected, filters, overflow preserves ack, 50000 concurrent publications, badge colors and top-right bounds in four framebuffer formats, warning details");
     return 0;
 }

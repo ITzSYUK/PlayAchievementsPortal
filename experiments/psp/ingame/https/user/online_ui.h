@@ -5,6 +5,7 @@
 #include <pspaudio.h>
 #include <pspge.h>
 #include "ra_ui.h"
+#include "ra_badge.h"
 #include "ui_pause.h"
 #include "ui_display.h"
 static ra_ui* online_ui;
@@ -13,10 +14,55 @@ static unsigned ui_previous, ui_filter, ui_selected;
 static uint64_t ui_hold_started, ui_notice_until;
 static ra_ui_notice ui_notice;
 static unsigned ui_network_pending,ui_network_delay;
+static unsigned ui_network_reason;
+static int ui_network_code;
+static void* ui_badge_pack;
+static unsigned ui_badge_pack_size;
 static unsigned ui_home_seen;
 /* Worker-only status path, separate from the callback's SPSC achievement queue. */
 static void ui_network_notice(unsigned type,unsigned delay_ms)
-{ ui_network_pending=type;ui_network_delay=(delay_ms+999)/1000; }
+{
+    /* Keep the concrete failure until UI consumes it; a quick reconnect must
+     * not replace the error with CONNECTING/CONNECTED before it was shown. */
+    if(ui_network_reason && (ui_network_pending==8 || ui_network_pending==12) &&
+       (type==7 || type==9 || type==13))return;
+    unsigned keep=type==8 && ui_network_pending==8 && ui_network_reason;
+    ui_network_pending=type;ui_network_delay=(delay_ms+999)/1000;
+    if(!keep){ui_network_reason=0;ui_network_code=0;}
+}
+static void ui_network_error(unsigned type,unsigned delay_ms,unsigned reason,int error)
+{ ui_network_notice(type,delay_ms);ui_network_reason=reason;ui_network_code=error; }
+static void ui_badges_load(void)
+{
+    SceIoStat st;SceUID fd;unsigned used=0,i;int n,rc;
+    const char* path=RA_CLIENT_DIR "badges/UCUS-98662.pbad";
+    if(!online_ui || sceIoGetstat(path,&st)<0)return;
+    if(st.st_size<48 || st.st_size>RA_BADGE_PACK_LIMIT)goto bad;
+    ui_badge_pack_size=(unsigned)st.st_size;
+    if((unsigned)mallinfo().uordblks>RA_CLIENT_HEAP_BYTES-ui_badge_pack_size-131072u)goto bad;
+    ui_badge_pack=malloc(ui_badge_pack_size);
+    if(!ui_badge_pack)goto bad;
+    fd=sceIoOpen(path,PSP_O_RDONLY,0);if(fd<0)goto bad;
+    while(used<ui_badge_pack_size) {
+        n=sceIoRead(fd,(unsigned char*)ui_badge_pack+used,ui_badge_pack_size-used);
+        if(n<=0 || (unsigned)n>ui_badge_pack_size-used)break;
+        used+=(unsigned)n;
+    }
+    rc=sceIoClose(fd);
+    if(rc<0 || used!=ui_badge_pack_size ||
+       !ra_badge_validate(ui_badge_pack,ui_badge_pack_size,"UCUS-98662"))goto bad;
+    used=0;
+    for(i=0;i<online_ui->count;++i) {
+        online_ui->rows[i].badge=ra_badge_pixels(ui_badge_pack,ui_badge_pack_size,online_ui->rows[i].id);
+        if(online_ui->rows[i].badge)++used;
+    }
+    ra_probe_log_printf(&logger,"BADGES loaded=%u rows=%u bytes=%u format=PBAD1\n",used,online_ui->count,ui_badge_pack_size);
+    return;
+bad:
+    free(ui_badge_pack);ui_badge_pack=NULL;ui_badge_pack_size=0;
+    ra_probe_log_printf(&logger,"BADGES rejected=1 placeholder=1\n");
+    ui_network_error(12,0,RA_REASON_BADGE,-35432);
+}
 static int ui_audio_channel=-1;
 static short* ui_pcm;
 static unsigned ui_surface_failures;
@@ -128,7 +174,7 @@ static void ui_pause_point(void)
 }
 static unsigned ui_fingerprint(void)
 {
-    unsigned i,hash=ui_filter*131u+ui_selected;
+    unsigned i,hash=ui_filter*131u+ui_selected+online_ui->details*65537u;
     for(i=0;i<online_ui->count;++i)hash=hash*16777619u+ra_ui_state(online_ui,i);
     return hash;
 }
@@ -224,9 +270,10 @@ static void ui_sound(void)
 static void ui_owner_events(void)
 {
     ra_session_event event;
-    if(!ui_ready)return;
-    while(ra_session_take_event(runtime,&event))
+    if(!ui_ready || __atomic_load_n(&sleep_events,__ATOMIC_ACQUIRE))return;
+    while(ra_session_take_event(runtime,&event)) {
         ra_ui_publish(online_ui,event.type,event.achievement_id,event.time_ms);
+    }
 }
 /* A validated PSP framebuffer can reside in EDRAM or partition 2. Accept
  * cached/uncached aliases, never kernel addresses or an overflowing extent. */
@@ -251,7 +298,7 @@ static void ui_poll(void)
 {
     SceCtrlData pad;ra_ui_surface surface;
     unsigned buttons,pressed,count;uint64_t now=now_ms(NULL);
-    if(!ui_ready)return;
+    if(!ui_ready || __atomic_load_n(&sleep_events,__ATOMIC_ACQUIRE))return;
     ui_audio_tick();
     if(sceCtrlPeekBufferPositive(&pad,1)>0) {
         unsigned combo=PSP_CTRL_LTRIGGER|PSP_CTRL_RTRIGGER|PSP_CTRL_SELECT;
@@ -266,6 +313,7 @@ static void ui_poll(void)
             ui_hold_started=0;ui_combo_latched=0;
             if(buttons&PSP_CTRL_HOME || pressed&PSP_CTRL_CIRCLE)ui_menu=0;
             else if(ui_menu) {
+                if(pressed&PSP_CTRL_SQUARE)online_ui->details^=1;
                 if(pressed&PSP_CTRL_TRIANGLE){ui_filter=(ui_filter+1)%3;ui_selected=0;}
                 if(pressed&PSP_CTRL_UP && ui_selected)--ui_selected;
                 if(pressed&PSP_CTRL_DOWN)++ui_selected;
@@ -284,6 +332,7 @@ static void ui_poll(void)
         unsigned tries;
         if(ui_network_pending) {
             ui_notice=(ra_ui_notice){ui_network_pending,ui_network_delay,0};ui_network_pending=0;
+            online_ui->reason=ui_network_reason;online_ui->error_code=ui_network_code;
             ui_notice_until=now+3500;++ui_notice_serial;
         } else for(tries=0;tries<RA_UI_NOTICES && ra_ui_take(online_ui,&ui_notice);++tries) {
             unsigned i;
@@ -361,6 +410,7 @@ static int ui_shutdown(void)
     }
     free(ui_display.buffer[0].pixels);free(ui_display.buffer[1].pixels);
     ui_display.buffer[0].pixels=ui_display.buffer[1].pixels=NULL;
-    free(ui_pcm);ui_pcm=NULL;free(online_ui);online_ui=NULL;return 0;
+    free(ui_pcm);ui_pcm=NULL;free(online_ui);online_ui=NULL;
+    free(ui_badge_pack);ui_badge_pack=NULL;ui_badge_pack_size=0;return 0;
 }
 #endif

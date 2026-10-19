@@ -5,8 +5,8 @@
 #define RA_CLIENT_MAGIC UINT32_C(0x52414339)
 #ifdef RA_CLIENT_HTTPS
 #include "ra_game_memory.h"
-#define RA_CLIENT_MINOR 48
-#define RA_CLIENT_VERSION "0.48"
+#define RA_CLIENT_MINOR 49
+#define RA_CLIENT_VERSION "0.49"
 #define RA_CLIENT_RUNTIME "rc_client-softcore"
 #define RA_CLIENT_STATIC_AUDIT_ONLY 0
 #define RA_CLIENT_RUNTIME_PROBE_ONLY 0
@@ -48,11 +48,11 @@ static inline int ra_client_user_range(uint32_t address, uint32_t size)
 }
 #define RA_CLIENT_ENTRY_STACK 8192u
 #ifdef RA_CLIENT_HTTPS
-/* 0.47: PT_LOAD 355396 bytes, PRX file 424554 bytes. File reserve is
- * 4 KiB above 0.46 and included in preflight. Module limit, heap and
- * minimum free memory are unchanged. DNS uses a temporary 8 KiB stack. */
-#define RA_CLIENT_MODULE_LIMIT 356352u
-#define RA_CLIENT_FILE_LIMIT 427008u
+/* 0.49: measured PRX fits 376 KiB PT_LOAD / 436 KiB file reserves.
+ * Reserves rounded to 4 KiB; heap and free floor stay unchanged.
+ * Pending snapshots/wire are bounded BSS; DNS retains its 8 KiB stack. */
+#define RA_CLIENT_MODULE_LIMIT 385024u
+#define RA_CLIENT_FILE_LIMIT 446464u
 #else
 #define RA_CLIENT_MODULE_LIMIT 294912u
 #define RA_CLIENT_FILE_LIMIT 327680u

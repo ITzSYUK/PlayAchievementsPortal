@@ -3,6 +3,7 @@
 #include "rc_client.h"
 #include "ra_response_limits.h"
 #include "ra_ui.h"
+#include "ra_pending.h"
 #define RA_SESSION_SLOTS 2
 #define RA_SESSION_POST_LIMIT 8192u
 #define RA_SESSION_RESPONSE_LIMIT RA_RESPONSE_BODY_LIMIT
@@ -101,6 +102,15 @@ int ra_session_login_token(ra_client_session*, const char* username, const char*
 /* The caller must compute/verify this hash from the actual image first. */
 int ra_session_load_game(ra_client_session*, const char* verified_hash);
 void ra_session_tick(ra_client_session*, int verified_game_frame, int paused);
+/* Owner only. Persistence is opt-in before login; restored entries are checked
+ * against current server progress and the exact authenticated account/hash. */
+int ra_session_pending_enable(ra_client_session*,uint64_t utc_seconds);
+int ra_session_pending_snapshot(ra_client_session*,ra_pending*);
+unsigned ra_session_pending_generation(const ra_client_session*);
+int ra_session_pending_restore(ra_client_session*,const ra_pending*,uint64_t utc_seconds);
+/* Revalidates current native memrefs without evaluating conditions, resets
+ * hit/Delta history, keeps current-session pending requests. Owner only. */
+int ra_session_resume(ra_client_session*);
 /* Transport methods never call rc_client. Stop using request pointers before
  * calling complete: it publishes ownership back to the owner. No body logging. */
 int ra_session_take_request(ra_client_session*, ra_session_request*);
