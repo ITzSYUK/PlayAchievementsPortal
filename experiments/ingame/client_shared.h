@@ -5,8 +5,8 @@
 #define RA_CLIENT_MAGIC UINT32_C(0x52414339)
 #ifdef RA_CLIENT_HTTPS
 #include "ra_game_memory.h"
-#define RA_CLIENT_MINOR 49
-#define RA_CLIENT_VERSION "0.49"
+#define RA_CLIENT_MINOR 50
+#define RA_CLIENT_VERSION "0.50"
 #define RA_CLIENT_RUNTIME "rc_client-softcore"
 #define RA_CLIENT_STATIC_AUDIT_ONLY 0
 #define RA_CLIENT_RUNTIME_PROBE_ONLY 0
@@ -48,11 +48,11 @@ static inline int ra_client_user_range(uint32_t address, uint32_t size)
 }
 #define RA_CLIENT_ENTRY_STACK 8192u
 #ifdef RA_CLIENT_HTTPS
-/* 0.49: measured PRX fits 376 KiB PT_LOAD / 436 KiB file reserves.
+/* 0.50: measured PRX fits 376 KiB PT_LOAD / 440 KiB file reserves.
  * Reserves rounded to 4 KiB; heap and free floor stay unchanged.
  * Pending snapshots/wire are bounded BSS; DNS retains its 8 KiB stack. */
 #define RA_CLIENT_MODULE_LIMIT 385024u
-#define RA_CLIENT_FILE_LIMIT 446464u
+#define RA_CLIENT_FILE_LIMIT 450560u
 #else
 #define RA_CLIENT_MODULE_LIMIT 294912u
 #define RA_CLIENT_FILE_LIMIT 327680u
@@ -74,6 +74,7 @@ typedef struct {
 #ifdef RA_CLIENT_HTTPS
     uint32_t log_session;
     volatile uint32_t exit_user_flags;
+    volatile uint32_t power_flags, resume_stage;
     volatile uint32_t request_allowed;
     /* Immutable game map published before request_allowed. No callback or
      * kernel function pointer is passed across the privilege boundary. */

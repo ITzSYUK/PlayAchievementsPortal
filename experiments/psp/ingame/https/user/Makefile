@@ -49,7 +49,7 @@ main.o: socket_io.h
 main.o: dns_job.h
 main.o: ../../../../ingame/log_lifecycle.h
 main.o: online_ui.h ../../../../../online/include/ra_ui.h
-main.o: pending_store.h resume_owner.h
+main.o: pending_store.h resume_owner.h resume_log.h
 main.o ra_pending.o ra_client_session.o: ../../../../../online/include/ra_pending.h
 main.o ra_badge.o: ../../../../../online/include/ra_badge.h
 main.o: ../../../../ingame/ui_pause.h ../../../../ingame/ui_display.h

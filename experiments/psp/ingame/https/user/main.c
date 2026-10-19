@@ -120,6 +120,8 @@ static unsigned wifi_online;
 static unsigned stop_from_module,power_stop_flags;
 static uint32_t sleep_events;
 static unsigned sleep_epoch;
+static unsigned sleep_flags;
+static uint64_t resume_after;
 static unsigned sleep_was_active,recovery_busy;
 static uint64_t sleep_started;
 static unsigned char resume_code[64];
@@ -219,6 +221,7 @@ static int record(const char* label, int rc)
 { ra_probe_log_printf(&logger, "%s: 0x%08X\n", label, (unsigned)rc); return rc; }
 static uint64_t now_ms(void* unused) { (void)unused; return sceKernelGetSystemTimeWide() / 1000; }
 #include "log_sync.h"
+#include "resume_log.h"
 static int run_runtime_probe(void)
 {
     uint32_t previous=0;unsigned second;
@@ -351,7 +354,11 @@ static int cancelled(void* unused)
 {
     int event_error, sync_rc;
     (void)unused; sceKernelCheckCallback();
-    if(__atomic_load_n(&sleep_events,__ATOMIC_ACQUIRE)==1u)return control->stop!=0;
+    if(__atomic_load_n(&sleep_events,__ATOMIC_ACQUIRE)) {
+        if(recovery_busy || !(__atomic_load_n(&sleep_events,__ATOMIC_ACQUIRE)&2u) ||
+           now_ms(NULL)<resume_after)return control->stop!=0;
+        if(!resume_log_prepare())return control->stop!=0;
+    }
     drain_transport_report();
     drain_request_trace();
     if (runtime && (!engine_enabled || ra_ui_pause_phase(&ui_pause)==RA_UI_PAUSE_ACK || (uint32_t)(sceKernelGetSystemTimeLow()-engine_last_us)>250000u) &&
@@ -389,8 +396,7 @@ static int cancelled(void* unused)
     }
     return 0;
 }
-static int check(void)
-{ return cancelled(NULL) ? RA_HTTPS_CANCEL : now_ms(NULL) >= deadline ? RA_HTTPS_TIMEOUT : 0; }
+static int check(void);
 static int power_event(int unused, int flags, void* context);
 static int power_create(void* unused) { (void)unused; return sceKernelCreateCallback("RATlsPower", power_event, NULL); }
 static int power_register(int slot, int cb, void* unused) { (void)unused; return scePowerRegisterCallback(slot, cb); }

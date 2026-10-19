@@ -513,12 +513,14 @@ int main(void)
      * user notification from worker cleanup completion. */
     reset();log_session=7;shared_test.magic=RA_CLIENT_MAGIC;shared_test.size=sizeof(shared_test);
     shared_test.exit_user_flags=RA_EXIT_USER_REBOOT;logger.write=NULL;logger.error=-88;
+    shared_test.result=-35433;shared_test.power_flags=0x20000;shared_test.resume_stage=5;
     assert(module_reboot_phase(1,NULL,0,0)==0 && module_reboot_phase(2,NULL,0,0)==0);
     assert(module_reboot_phase(99,NULL,0,0)==0 && !mock.exit_opens && !mock.joins);
     mock.exit_write_mode=1;mock.exit_reenter=1;
     assert(module_reboot_phase(3,NULL,0,0)==0);
     assert(strstr(mock.exit_log,"EXIT_NOTICE session=7") && strstr(mock.exit_log,"source=kernel_reboot_phase3"));
     assert(strstr(mock.exit_log,"user_flags=1 worker_done=0") && mock.exit_writes>1);
+    assert(strstr(mock.exit_log,"user_result=-35433 power_flags=0x00020000 resume_stage=5"));
     assert(mock.exit_opens==1 && mock.exit_closes==1);
     assert(!mock.joins && !mock.stops && !mock.unloads && !mock.frees && control==&shared_test);
     assert(!exit_notice_busy && !exit_notice_last_result && logger.error==-88);

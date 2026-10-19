@@ -9,6 +9,13 @@ RC_OBJECTS = $(patsubst $(RC_ROOT)/%.c,$(BUILD)/rcheevos/%.o,$(RC_SOURCES))
 LOCAL_OBJECTS = $(BUILD)/ra_pending.o $(BUILD)/ra_psp_memory.o $(BUILD)/ra_psp_hash.o $(BUILD)/offline_probe.o $(BUILD)/offline_main.o $(BUILD)/hash_probe.o $(BUILD)/probe_log.o $(BUILD)/test_probe_log.o $(BUILD)/ra_client_session.o $(BUILD)/test_client_session.o
 
 .PHONY: all test
+all: $(BUILD)/test_resume_log
+$(BUILD)/test_resume_log: test_resume_log.c ../psp/ingame/https/user/resume_log.h ../common/probe_log.c | $(BUILD)
+	$(CC) $(CPPFLAGS) $(CFLAGS) test_resume_log.c ../common/probe_log.c -o $@
+test: resume-log-test
+.PHONY: resume-log-test
+resume-log-test: $(BUILD)/test_resume_log
+	$(BUILD)/test_resume_log
 all: $(BUILD)/test_resume_owner
 $(BUILD)/test_resume_owner: test_resume_owner.c ../psp/ingame/https/user/resume_owner.h ../../online/src/ra_game_memory.c ../../online/src/ra_psp_memory.c | $(BUILD)
 	$(CC) $(CPPFLAGS) $(CFLAGS) test_resume_owner.c ../../online/src/ra_game_memory.c ../../online/src/ra_psp_memory.c -o $@

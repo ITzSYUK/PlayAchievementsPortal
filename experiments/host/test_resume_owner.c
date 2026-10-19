@@ -1,27 +1,29 @@
 #include "ra_client_session.h"
 #include "ra_game_memory.h"
+#include "ra_https.h"
 #include "../ingame/ui_pause.h"
 #include <assert.h>
 #include <stdarg.h>
 #include <stdio.h>
 #include <string.h>
-#define PSP_POWER_CB_SUSPENDING 1
-#define PSP_POWER_CB_POWER_SWITCH 2
-#define PSP_POWER_CB_RESUMING 4
-#define PSP_POWER_CB_RESUME_COMPLETE 8
+#define PSP_POWER_CB_SUSPENDING 0x00010000
+#define PSP_POWER_CB_POWER_SWITCH 0x80000000u
+#define PSP_POWER_CB_RESUMING 0x00020000
+#define PSP_POWER_CB_RESUME_COMPLETE 0x00040000
 #define RA_MAIL_IDLE 0
-static struct { unsigned stop,probe_installed; int result; ra_game_map game_map; } ctl,*control=&ctl;
+static struct { unsigned stop,probe_installed,power_flags,resume_stage; int result; ra_game_map game_map; } ctl,*control=&ctl;
 static struct { unsigned active; } ui_display;
 static struct { unsigned reset; } wifi_policy;
 static ra_ui_pause ui_pause;
 static ra_game_reader game_reader;
 static ra_client_session* runtime;
 static unsigned sleep_events,sleep_epoch,sleep_was_active,recovery_busy,power_stop_flags;
+static unsigned sleep_flags,delay_calls,wake_on_delay;
 static unsigned engine_enabled,ui_tile_enabled,engine_last_us,ui_menu,ui_render_valid;
 static unsigned report_ready,wifi_poll_at,wifi_online,mailbox,logger;
 static unsigned resume_code_ready,reads,hashes,resets,stops,notices,errors;
 static int read_ok,hash_result,resume_ok,display_closes,suspend_during_hash;
-static uint64_t clock_ms,sleep_started,deadline;
+static uint64_t clock_ms,sleep_started,deadline,resume_after;
 static unsigned char resume_code[64],memory_code[64];
 static uint64_t now_ms(void* p) { (void)p;return clock_ms; }
 static unsigned sceKernelGetSystemTimeLow(void) { return (unsigned)(clock_ms*1000); }
@@ -34,6 +36,18 @@ static void ui_network_error(unsigned type,unsigned delay,unsigned reason,int co
 static unsigned read_game_segment(unsigned address,unsigned char* out,unsigned size,void* p)
 { (void)p;assert(address==0x08842D90 && size==64);++reads;memcpy(out,memory_code,size);return read_ok?size:0; }
 static int power_event(int,int,void*);
+static void resume_service(void);
+static int cancelled(void* p)
+{
+    (void)p;
+    if((sleep_events&2) && clock_ms>=resume_after && !recovery_busy)resume_service();
+    return ctl.stop!=0;
+}
+static void sceKernelDelayThread(unsigned us)
+{
+    clock_ms+=us/1000;++delay_calls;
+    if(wake_on_delay && delay_calls==wake_on_delay)power_event(0,PSP_POWER_CB_RESUMING,NULL);
+}
 static int disc_hash(char hash[33])
 {
     ++hashes;memset(hash,0,33);clock_ms+=10;
@@ -54,6 +68,7 @@ static void setup(void)
     game_reader.map.count=1;game_reader.map.regions[0]=(ra_game_region){0x08804000,0x100000};
     ctl.game_map=game_reader.map;ctl.probe_installed=1;
     sleep_events=sleep_epoch=report_ready=mailbox=power_stop_flags=0;
+    delay_calls=wake_on_delay=0;sleep_flags=0;resume_after=0;
     engine_enabled=ui_tile_enabled=resume_code_ready=1;
     reads=hashes=resets=stops=notices=errors=recovery_busy=0;
     read_ok=resume_ok=display_closes=1;hash_result=suspend_during_hash=0;
@@ -67,8 +82,8 @@ static void sleep_and_wake(void)
     assert(!engine_enabled && !ui_tile_enabled && sleep_events==1 && sleep_was_active);
     assert(!reads && !hashes && !resets && !stops && !ctl.stop); /* callback never waits or reads */
     clock_ms=200;resume_service();assert(!reads && !hashes && !resets);
-    assert(!power_event(0,PSP_POWER_CB_RESUMING,NULL));assert(sleep_events==1);
-    assert(!power_event(0,PSP_POWER_CB_RESUME_COMPLETE,NULL));assert(sleep_events==3);
+    assert(!power_event(0,PSP_POWER_CB_RESUMING,NULL));assert(sleep_events==3);
+    /* Deliberately no COMPLETE: real SDK may defer it until another event. */
 }
 int main(void)
 {
@@ -103,8 +118,19 @@ int main(void)
     assert(sleep_events==1 && !engine_enabled && !ctl.stop && deadline==500);
     power_event(0,PSP_POWER_CB_RESUME_COMPLETE,NULL);resume_service();
     assert(!sleep_events && engine_enabled && hashes==2 && deadline==620);
-    setup();power_event(0,PSP_POWER_CB_POWER_SWITCH,NULL);
-    power_event(0,PSP_POWER_CB_RESUME_COMPLETE|PSP_POWER_CB_POWER_SWITCH,NULL);resume_service();
+    setup();power_event(0,PSP_POWER_CB_POWER_SWITCH|PSP_POWER_CB_RESUME_COMPLETE,NULL);
+    assert(sleep_events==1); /* sticky COMPLETE cannot undo a fresh suspend */
+    power_event(0,PSP_POWER_CB_RESUMING|PSP_POWER_CB_POWER_SWITCH,NULL);resume_service();
+    assert(!sleep_events && engine_enabled && !ctl.stop);
+    setup();power_event(0,PSP_POWER_CB_POWER_SWITCH,NULL);wake_on_delay=3;
+    assert(check()==0 && !sleep_events && engine_enabled && delay_calls>=16);
+    assert(hashes==1 && !ctl.stop); /* startup/observation caller was parked */
+    power_event(0,PSP_POWER_CB_RESUME_COMPLETE,NULL);assert(!sleep_events && engine_enabled);
+    resume_service();assert(hashes==1); /* late COMPLETE cannot restart recovery */
+    setup();recovery_busy=1;sleep_events=1;
+    assert(check()==RA_HTTPS_CANCEL && !ctl.stop); /* abort hash if sleep repeats */
+    setup();power_event(0,0x40000000,NULL);assert(!sleep_events && engine_enabled); /* HOLD */
+    power_event(0,PSP_POWER_CB_RESUMING,NULL);resume_service(); /* coalesced notifications */
     assert(!sleep_events && engine_enabled && !ctl.stop);
     puts("PASS power recovery: callback disables frames without I/O, waits for transport/report/display, verifies map/code/hash/memory, rejects seven failures, startup and deadline overflow");
     return 0;
