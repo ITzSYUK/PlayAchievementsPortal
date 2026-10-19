@@ -9,10 +9,12 @@ static volatile int exit_log_ready;
 static int exit_notice_busy, exit_notice_last_result;
 static int exit_notice(const char* source, int result)
 {
-    char line[384];
+    char line[512];
     uint32_t flags = 0, done = 0;
     uint32_t user_stop=0,power_flags=0,resume_stage=0;
     int user_result=0;
+    int boot_result,boot_log_error,reopen_error;
+    unsigned reopens;
     unsigned session;
     int stage = 0, intr, length, fd, rc = 0, close_rc;
     unsigned offset = 0;
@@ -22,6 +24,8 @@ static int exit_notice(const char* source, int result)
     }
     exit_notice_busy = 1;
     session = log_session;
+    boot_result=observer_result;boot_log_error=logger.error;
+    reopens=bootstrap_log_reopens;reopen_error=bootstrap_log_reopen_error;
     /* cleanup clears control with interrupts masked before freeing it. */
     if (control && control->magic == RA_CLIENT_MAGIC && control->size == sizeof(*control)) {
         flags = control->exit_user_flags;
@@ -32,10 +36,11 @@ static int exit_notice(const char* source, int result)
     }
     sceKernelCpuResumeIntr(intr);
     length = ra_kernel_snprintf(line, sizeof(line),
-        "EXIT_NOTICE session=%u uptime_us32=%u source=%s result=%d user_flags=%u worker_done=%u stop_stage=%d prior_io=%d user_stop=%u user_result=%d power_flags=0x%08X resume_stage=%u\n",
+        "EXIT_NOTICE session=%u uptime_us32=%u source=%s result=%d user_flags=%u worker_done=%u stop_stage=%d prior_io=%d user_stop=%u user_result=%d power_flags=0x%08X resume_stage=%u bootstrap_result=%d bootstrap_log_error=%d log_reopens=%u reopen_error=%d\n",
         session, (unsigned)sceKernelGetSystemTimeLow(), source, result,
         (unsigned)flags, (unsigned)done, stage, exit_notice_last_result,
-        (unsigned)user_stop,user_result,(unsigned)power_flags,(unsigned)resume_stage);
+        (unsigned)user_stop,user_result,(unsigned)power_flags,(unsigned)resume_stage,
+        boot_result,boot_log_error,reopens,reopen_error);
     if (length <= 0 || (unsigned)length >= sizeof(line) ||
         (unsigned)length > RA_CLIENT_EXIT_LOG_RESERVE - exit_notice_bytes) { rc = -1; goto finish; }
     exit_notice_bytes += (unsigned)length;

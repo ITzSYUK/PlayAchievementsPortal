@@ -5,8 +5,8 @@
 #define RA_CLIENT_MAGIC UINT32_C(0x52414339)
 #ifdef RA_CLIENT_HTTPS
 #include "ra_game_memory.h"
-#define RA_CLIENT_MINOR 50
-#define RA_CLIENT_VERSION "0.50"
+#define RA_CLIENT_MINOR 51
+#define RA_CLIENT_VERSION "0.51"
 #define RA_CLIENT_RUNTIME "rc_client-softcore"
 #define RA_CLIENT_STATIC_AUDIT_ONLY 0
 #define RA_CLIENT_RUNTIME_PROBE_ONLY 0

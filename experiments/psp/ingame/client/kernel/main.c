@@ -65,6 +65,8 @@ static int probe_was_installed;
 #endif
 static ra_probe_log logger;
 #ifdef RA_CLIENT_HTTPS
+static unsigned bootstrap_log_reopens,bootstrap_log_reported;
+static int bootstrap_log_reopen_error;
 #include "log_history.h"
 #include "log_lifecycle.h"
 #include "../../https/kernel/exit_notice.h"
@@ -81,6 +83,22 @@ static int log_write(const void* data, unsigned size, void* unused)
 #endif
     if (written >= limit || size > limit - written) return (int)size;
     rc = sceIoWrite(log_fd, data, size);
+#ifdef RA_CLIENT_HTTPS
+    /* The Memory Stick handle may become invalid across suspend. Recover
+     * synchronously in this observer, before probe_log latches an I/O error
+     * and snapshot() stops the healthy user client. One attempt per failure;
+     * never create/truncate a session log or silently drop a failed write. */
+    if(rc<=0 && exit_log_ready && log_session) {
+        int fd;
+        bootstrap_log_reopen_error=rc<0?rc:-1;
+        if(log_fd>=0)sceIoClose(log_fd);
+        log_fd=-1;
+        fd=sceIoOpen(RA_CLIENT_DIR "client-bootstrap.log",PSP_O_WRONLY|PSP_O_APPEND,0);
+        if(fd<0)return fd;
+        log_fd=fd;++bootstrap_log_reopens;
+        rc=sceIoWrite(log_fd,data,size);
+    }
+#endif
     if (rc > 0) written += (unsigned)rc;
     return rc;
 }
@@ -454,6 +472,13 @@ static int observer(SceSize args, void* argp)
     for (second = 0; !stopping; ++second) {
 #else
     for (second = 0; second <= RA_CLIENT_OBSERVE_SECONDS && !stopping; ++second) {
+#endif
+#ifdef RA_CLIENT_HTTPS
+        if(bootstrap_log_reported!=bootstrap_log_reopens) {
+            bootstrap_log_reported=bootstrap_log_reopens;
+            ra_probe_log_printf(&logger,"BOOT_LOG_REOPEN count=%u prior_write=%d\n",
+                bootstrap_log_reopens,bootstrap_log_reopen_error);
+        }
 #endif
         result = snapshot(second <= 20 || second % 60 == 0 ? "observe" : NULL, second, NULL);
         if (result < 0) break;

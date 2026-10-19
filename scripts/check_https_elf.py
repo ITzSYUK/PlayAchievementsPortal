@@ -28,7 +28,7 @@ def check(path, kernel):
 
     info = by_name['.rodata.sceModuleInfo'][4]
     attr, minor, major = struct.unpack_from('<HBB', data, info)
-    assert (attr, minor, major) == (0x1000 if kernel else 0, 50, 0)
+    assert (attr, minor, major) == (0x1000 if kernel else 0, 51, 0)
     expected = 'RAClientBootstrap' if kernel else 'RAClientUser'
     assert name_at(info+4) == expected
     first, last = struct.unpack_from('<II', data, info+36)
@@ -72,7 +72,7 @@ def check(path, kernel):
         limit = int(re.search(r'#define RA_CLIENT_MODULE_LIMIT (\d+)u', shared.read_text()).group(1))
         used = check_memory(path.with_suffix('.prx').read_bytes(), limit)
         print(f'PASS final PRX PT_LOAD: {used} bytes, loader limit={limit}, margin={limit-used}')
-    print('PASS PSP metadata:', expected, '0.50, start/stop/reboot_phase/info exports, no kernel sceIoSync' if kernel else '0.50, start/stop/reboot_before/info exports, heap')
+    print('PASS PSP metadata:', expected, '0.51, start/stop/reboot_phase/info exports, no kernel sceIoSync' if kernel else '0.51, start/stop/reboot_before/info exports, heap')
 
 
 check(Path(sys.argv[1]), True)

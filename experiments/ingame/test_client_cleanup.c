@@ -43,6 +43,9 @@ static struct {
     unsigned starts, stops, unloads, frees, log_length, user_free, seconds;
     int timed_worker;
     unsigned done_second;
+    unsigned stale_log_second,reopen_attempts;
+    int reopened_write_error;
+    int stale_log_zero,reopened_partial;
     int exit_open_error, exit_write_mode, exit_close_error, exit_reenter, append_error;
     unsigned exit_opens, exit_writes, exit_closes, joins, exit_length;
     char exit_log[2048];
@@ -64,6 +67,7 @@ static void reset(void)
 #ifdef RA_CLIENT_HTTPS
     log_lifecycle=0;log_session=0;
     exit_notice_bytes=0;exit_notice_busy=0;exit_notice_last_result=0;
+    bootstrap_log_reopens=bootstrap_log_reported=0;bootstrap_log_reopen_error=0;
     exit_log_ready=1;
 #endif
     observer_result = 0; partition_size = RA_CLIENT_USER_SIZE;
@@ -128,7 +132,10 @@ int sceIoWrite(int fd, const void* data, unsigned size)
         mock.exit_log[mock.exit_length]=0;return (int)size;
     }
 #endif
-    assert(mock.capture && (fd == 1 || fd == 3));
+    assert(mock.capture && (fd == 1 || fd == 3 || fd==4));
+    if(mock.stale_log_second && mock.seconds>=mock.stale_log_second && fd==3)return mock.stale_log_zero?0:-81;
+    if(fd==4 && mock.reopened_write_error)return mock.reopened_write_error;
+    if(fd==4 && mock.reopened_partial && size>7)size=7;
     assert(size < sizeof(mock.log) - mock.log_length);
     memcpy(mock.log + mock.log_length, data, size); mock.log_length += size;
     mock.log[mock.log_length] = 0; return (int)size;
@@ -201,7 +208,11 @@ int sceIoOpen(const char* path, int flags, int mode)
     if(flags==(PSP_O_WRONLY|PSP_O_APPEND)) {
         assert(!strcmp(path,RA_CLIENT_DIR "client-bootstrap.log") && mode==0);
 #ifdef RA_CLIENT_HTTPS
-        if(!exit_notice_busy)return mock.append_error ? mock.append_error : 3;
+        if(!exit_notice_busy) {
+            if(mock.stale_log_second && mock.seconds>=mock.stale_log_second)++mock.reopen_attempts;
+            return mock.append_error ? mock.append_error :
+                mock.stale_log_second && mock.seconds>=mock.stale_log_second?4:3;
+        }
 #endif
         ++mock.exit_opens;return mock.exit_open_error ? mock.exit_open_error : 2;
     }
@@ -232,6 +243,26 @@ int main(void)
     prepare_start(); written=RA_CLIENT_BOOT_LOG_LIMIT;
     assert(ra_probe_log_printf(&logger,"full log is not a session failure\n") && !logger.error);
     assert(written==RA_CLIENT_BOOT_LOG_LIMIT);
+#ifdef RA_CLIENT_HTTPS
+    /* Bootstrap log errors must be repaired before probe_log latches them.
+     * Permanent errors still propagate; there is no truncate/create fallback. */
+    prepare_start();log_fd=3;log_session=1;mock.seconds=60;mock.stale_log_second=60;
+    mock.reopened_partial=1;
+    assert(ra_probe_log_printf(&logger,"reconnected after suspend\n"));
+    assert(!strcmp(mock.log,"reconnected after suspend\n") && written==strlen(mock.log));
+    assert(mock.reopen_attempts==1 && bootstrap_log_reopens==1 && !logger.error);
+    prepare_start();log_fd=3;log_session=1;mock.seconds=60;mock.stale_log_second=60;
+    mock.stale_log_zero=1;
+    assert(ra_probe_log_printf(&logger,"zero write repaired\n") && bootstrap_log_reopen_error==-1);
+    prepare_start();log_fd=3;log_session=1;mock.seconds=60;mock.stale_log_second=60;
+    mock.append_error=-82;
+    assert(!ra_probe_log_printf(&logger,"cannot reopen\n") && logger.error==-82);
+    assert(mock.reopen_attempts==1 && !bootstrap_log_reopens && !written && log_fd==-1);
+    prepare_start();log_fd=3;log_session=1;mock.seconds=60;mock.stale_log_second=60;
+    mock.reopened_write_error=-83;
+    assert(!ra_probe_log_printf(&logger,"cannot write new fd\n") && logger.error==-83);
+    assert(!ra_probe_log_printf(&logger,"no retry storm\n") && mock.reopen_attempts==1);
+#endif
     reset(); assert(cleanup() == 0 && child == -1 && block == -1 && control == NULL);
     assert(mock.stops == 1 && mock.unloads == 1 && mock.frees == 1);
     reset(); mock.stop_error = -77;
@@ -462,12 +493,15 @@ int main(void)
         assert(mapped_control->game_map.count==2 && mapped_control->game_map.regions[0].address==0x08840000);
         /* A live worker must survive the old bootstrap 720-second watchdog. */
         prepare_start();mock.timed_worker=1;mock.done_second=RA_CLIENT_OBSERVE_SECONDS+120;
+        mock.stale_log_second=60; /* first periodic write after a simulated suspend */
         game_test.text_addr=game_test.segmentaddr[0]=0x08840000;game_test.text_size=65536;
         game_test.segmentsize[0]=65536;game_test.segmentaddr[1]=0x089B4000;
         game_test.segmentsize[1]=4096;game_test.nsegment=2;
         descriptor[5]=0x08842D90;
         assert(observer(0,NULL)==0 && observer_result==0);
         assert(mock.seconds==mock.done_second+1 && mock.seconds>RA_CLIENT_OBSERVE_SECONDS);
+        assert(mock.reopen_attempts==1 && bootstrap_log_reopens==1 && !logger.error);
+        assert(strstr(mock.log,"BOOT_LOG_REOPEN count=1 prior_write=-81"));
         assert(descriptor[5]==0x08842D90 && !probe_hook_installed);
         control=mapped_control;assert(game_map_live()==0);
         game_test.segmentaddr[0]+=4;assert(game_map_live()==-35409);game_test.segmentaddr[0]-=4;
@@ -521,6 +555,7 @@ int main(void)
     assert(strstr(mock.exit_log,"EXIT_NOTICE session=7") && strstr(mock.exit_log,"source=kernel_reboot_phase3"));
     assert(strstr(mock.exit_log,"user_flags=1 worker_done=0") && mock.exit_writes>1);
     assert(strstr(mock.exit_log,"user_result=-35433 power_flags=0x00020000 resume_stage=5"));
+    assert(strstr(mock.exit_log,"bootstrap_result=0 bootstrap_log_error=-88 log_reopens=0 reopen_error=0"));
     assert(mock.exit_opens==1 && mock.exit_closes==1);
     assert(!mock.joins && !mock.stops && !mock.unloads && !mock.frees && control==&shared_test);
     assert(!exit_notice_busy && !exit_notice_last_result && logger.error==-88);
