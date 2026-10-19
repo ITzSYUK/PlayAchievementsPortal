@@ -99,6 +99,23 @@ int main(int argc, char** argv)
     options.deadline_ms = now_ms(NULL) + (argc >= 6 ? (unsigned)atoi(argv[5]) : 3000);
     rc = ra_https_post(&options, &result);
     close(io.fd);
+    if (getenv("RA_TEST_RETRY")) {
+        size_t i;
+        assert(rc==RA_HTTPS_TIMEOUT && !result.heap_remaining && !result.body_size);
+        for(i=0;i<sizeof(body);++i)assert(!body[i]);
+        printf("RETRY_AFTER_TIMEOUT code=%d remaining=%u\n",rc,(unsigned)result.heap_remaining);
+        /* Reuse the client context only after the failed connection and all
+         * TLS allocations have been released. The retry uses a fresh socket. */
+        io.fd=socket(AF_INET,SOCK_STREAM,0);
+        if(io.fd<0 || fcntl(io.fd,F_SETFL,O_NONBLOCK)<0)return 2;
+        rc=connect(io.fd,(struct sockaddr*)&address,sizeof(address));
+        if(rc<0 && errno!=EINPROGRESS){close(io.fd);return 2;}
+        wait_io(&io,1,3000);error=0;error_size=sizeof(error);
+        if(getsockopt(io.fd,SOL_SOCKET,SO_ERROR,&error,&error_size) || error){close(io.fd);return 2;}
+        options.deadline_ms=now_ms(NULL)+3000;
+        rc=ra_https_post(&options,&result);
+        close(io.fd);
+    }
     printf("probe_code=%d flags=0x%08X http_status=%d bytes=%u peak=%u remaining=%u\n", rc,
         (unsigned)result.verify_flags, result.status, (unsigned)result.body_size,
         (unsigned)result.heap_peak, (unsigned)result.heap_remaining);

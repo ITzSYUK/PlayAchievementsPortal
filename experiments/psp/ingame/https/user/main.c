@@ -39,6 +39,7 @@
 #include "rc_client.h"
 #include "rc_error.h"
 #include "md5.h"
+#include "socket_io.h"
 #include "../../../../tls/compact/gts_root.h"
 PSP_MODULE_INFO("RAClientUser", 0, 0, RA_CLIENT_MINOR);
 PSP_HEAP_SIZE_KB(2048);
@@ -61,6 +62,7 @@ static ra_client_control* control;
 static SceUID thread_id = -1, log_fd = -1, auth_fd = -1;
 static int socket_fd = -1;
 static ra_probe_log logger;
+#include "log_lifecycle.h"
 static ra_probe_power power_owner;
 static unsigned written, entropy_offset;
 static u64 epoch_tick;
@@ -75,10 +77,26 @@ static volatile int transport_stopping, transport_done;
 static int transport_started;
 static uint64_t transport_deadline;
 static unsigned transport_ticket;
+/* Sampled numeric transport diagnostics; no pointers or borrowed buffers. */
+enum { IO_DNS_CREATE=1, IO_DNS_LOOKUP, IO_SOCKET, IO_SOCKET_SETUP, IO_CONNECT,
+       IO_CONNECT_ERROR, IO_TLS, IO_SEND, IO_RECV, IO_POLL, IO_CLOSE, IO_DNS_DELETE, IO_DNS_STOP };
+static uint32_t transport_location,transport_actions;
+static void io_enter(unsigned call)
+{
+    __atomic_fetch_add(&transport_actions,1,__ATOMIC_RELAXED);
+    __atomic_store_n(&transport_location,call*2+1,__ATOMIC_RELEASE);
+}
+static void io_leave(unsigned call)
+{ __atomic_store_n(&transport_location,call*2,__ATOMIC_RELEASE); }
+static uint64_t now_ms(void* unused);
+static int transport_check(void);
+#include "dns_job.h"
 static mbedtls_ctr_drbg_context entropy_rng;
 typedef struct {
     int code, io_cleanup,retryable;
-    unsigned ticket;
+    unsigned ticket, kind, elapsed_ms;
+    ra_socket_mode socket_mode;
+    ra_dns_report dns;
     ra_https_result https;
 } transport_report;
 static transport_report report;
@@ -175,7 +193,8 @@ static int log_write(const void* data, unsigned size, void* unused)
 {
     int rc; (void)unused;
     /* Full diagnostic log does not stop a long session. Real I/O errors do. */
-    if (size > 131072u - written) return (int)size;
+    unsigned limit = 131072u - (log_lifecycle ? 0 : RA_LOG_STOP_RESERVE);
+    if (written >= limit || size > limit - written) return (int)size;
     rc = sceIoWrite(log_fd, data, size); if (rc > 0) written += (unsigned)rc; return rc;
 }
 void _exit(int result) __attribute__((noreturn));
@@ -248,6 +267,11 @@ static void drain_transport_report(void)
     if (!__atomic_load_n(&report_ready, __ATOMIC_ACQUIRE)) return;
     copy = report;
     __atomic_store_n(&report_ready, 0, __ATOMIC_RELEASE);
+    ra_probe_log_printf(&logger,"HTTP_TRANSFER ticket=%u kind=%u elapsed_ms=%u\n",copy.ticket,copy.kind,copy.elapsed_ms);
+    ra_probe_log_printf(&logger,"DNS_RESULT ticket=%u elapsed_ms=%u result=%d stop_calls=%u stop_result=%d\n",
+        copy.ticket,copy.dns.elapsed_ms,copy.dns.result,copy.dns.stop_calls,copy.dns.stop_result);
+    ra_probe_log_printf(&logger,"SOCKET_MODE ticket=%u set_result=%d read_result=%d value=%d size=%u\n",
+        copy.ticket,copy.socket_mode.set_result,copy.socket_mode.read_result,copy.socket_mode.value,copy.socket_mode.size);
     if(copy.code)ra_probe_log_printf(&logger,"HTTP_FAILURE ticket=%u code=%d retry_allowed=%u\n",copy.ticket,copy.code,(unsigned)copy.retryable);
     if((copy.code && copy.retryable) || (!copy.code && ra_startup_retry(RC_API_FAILURE,copy.https.status))) {
         if(!http_outage)ui_network_notice(8,0);
@@ -268,11 +292,49 @@ static void drain_transport_report(void)
 }
 #include "apctl_observer.h"
 #include "reconnect.h"
+static void drain_request_trace(void)
+{
+    ra_request_trace event;
+    unsigned count=0;
+    /* Startup diagnostics only. Once frames own queue_guard, a worker-side
+     * lock here would make engine_frame's nonblocking PollSema fail. Only
+     * this worker enables frames; engine_stop drains them before disabling. */
+    if(engine_enabled)return;
+    /* Bounded drain even if a frame owner keeps producing diagnostics. */
+    while(runtime && count++<RA_REQUEST_TRACE_CAPACITY && ra_session_take_request_trace(runtime,&event))
+        ra_probe_log_printf(&logger,"REQUEST_TRACE ticket=%u kind=%u stage=%u time_ms32=%u age_ms=%u status=%d\n",
+            event.ticket,event.kind,event.stage,event.time_ms,event.age_ms,event.status);
+}
+static void startup_progress(const char* phase, const ra_session_stats* stats)
+{
+    static uint64_t next;
+    SceKernelThreadInfo info;
+    int thread_rc;
+    uint64_t now=now_ms(NULL);
+    if(now<next)return;
+    next=now+5000;
+    ra_probe_log_printf(&logger,"STARTUP_WAIT phase=%s time_ms32=%u auth_pending=%d load_pending=%d pending=%u submitted=%u completed=%u result=%d http=%d copy_error=%d mailbox=%u report=%u trace_dropped=%u\n",
+        phase,(unsigned)now,stats->auth_pending,stats->load_pending,stats->pending,
+        stats->submitted,stats->completed,stats->last_result,stats->last_http_status,
+        stats->last_copy_error,ra_mail_phase(&mailbox),
+        (unsigned)__atomic_load_n(&report_ready,__ATOMIC_ACQUIRE),stats->request_trace_dropped);
+    memset(&info,0,sizeof(info));info.size=sizeof(info);
+    thread_rc=sceKernelReferThreadStatus(transport_thread,&info);
+    ra_probe_log_printf(&logger,"TRANSPORT_STATE location=%u actions=%u thread_query=%d status=%u wait_type=%d exit_status=%d\n",
+        (unsigned)__atomic_load_n(&transport_location,__ATOMIC_ACQUIRE),
+        (unsigned)__atomic_load_n(&transport_actions,__ATOMIC_RELAXED),thread_rc,
+        thread_rc<0?0:(unsigned)info.status,thread_rc<0?0:info.waitType,thread_rc<0?0:info.exitStatus);
+    ra_probe_log_printf(&logger,"DNS_STATE thread=%d done=%u cancel=%u\n",
+        __atomic_load_n(&dns_job.thread,__ATOMIC_ACQUIRE),
+        (unsigned)__atomic_load_n(&dns_job.done,__ATOMIC_ACQUIRE),
+        (unsigned)__atomic_load_n(&dns_job.cancel,__ATOMIC_ACQUIRE));
+}
 static int cancelled(void* unused)
 {
     int event_error, sync_rc;
     (void)unused; sceKernelCheckCallback();
     drain_transport_report();
+    drain_request_trace();
     if (runtime && (!engine_enabled || ra_ui_pause_phase(&ui_pause)==RA_UI_PAUSE_ACK || (uint32_t)(sceKernelGetSystemTimeLow()-engine_last_us)>250000u) &&
         !__sync_lock_test_and_set(&engine_gate, 1)) {
         /* While callbacks arrive, they own frame processing and completion
@@ -350,20 +412,20 @@ static int retryable(int e) { return e == EINTR || e == EAGAIN || e == EWOULDBLO
 static int send_bio(void* unused, const unsigned char* bytes, size_t size)
 {
     int rc; (void)unused; if (transport_cancelled(NULL)) return RA_HTTPS_CANCEL;
-    rc = sceNetInetSend(socket_fd, bytes, size, 0);
+    io_enter(IO_SEND);rc = ra_socket_send(socket_fd, bytes, size);io_leave(IO_SEND);
     return rc >= 0 ? rc : retryable(sceNetInetGetErrno()) ? MBEDTLS_ERR_SSL_WANT_WRITE : MBEDTLS_ERR_NET_SEND_FAILED;
 }
 static int recv_bio(void* unused, unsigned char* bytes, size_t size)
 {
     int rc; (void)unused; if (transport_cancelled(NULL)) return RA_HTTPS_CANCEL;
-    rc = sceNetInetRecv(socket_fd, bytes, size, 0);
+    io_enter(IO_RECV);rc = ra_socket_recv(socket_fd, bytes, size);io_leave(IO_RECV);
     return rc >= 0 ? rc : retryable(sceNetInetGetErrno()) ? MBEDTLS_ERR_SSL_WANT_READ : MBEDTLS_ERR_NET_RECV_FAILED;
 }
 static int wait_io(void* unused, int writing, unsigned ms)
 {
-    SceNetInetPollfd fd = { socket_fd, writing ? SCE_NET_INET_POLLOUT : SCE_NET_INET_POLLIN, 0 };
     int rc; (void)unused; if (transport_cancelled(NULL)) return RA_HTTPS_CANCEL;
-    rc = sceNetInetPoll(&fd, 1, ms); return rc < 0 && sceNetInetGetErrno() != EINTR ? MBEDTLS_ERR_NET_RECV_FAILED : 0;
+    io_enter(IO_POLL);rc = ra_socket_poll(socket_fd,writing,ms);io_leave(IO_POLL);
+    return rc < 0 && sceNetInetGetErrno() != EINTR ? MBEDTLS_ERR_NET_RECV_FAILED : 0;
 }
 static int profile(void)
 {
@@ -442,34 +504,40 @@ static int network_release(void* unused, int operation, int arg)
     return rc;
 }
 /* Network thread only. It never calls rc_client or writes the owner log. */
-static int transport_http(const ra_session_request* request, ra_https_result* result)
+static int transport_http(const ra_session_request* request, ra_https_result* result,
+    ra_socket_mode* socket_mode,ra_dns_report* dns)
 {
     int rc = -1;
-    int nonblock = 1, error = 0;
+    int error = 0;
     socklen_t error_size = sizeof(error);
     struct sockaddr_in address;
-    char dns[1024];
     ra_https_options options;
-#define STEP(call) do { rc = transport_check(); if (rc) goto end; \
-    rc = (call); \
+#define STEP(tag,call) do { rc = transport_check(); if (rc) goto end; \
+    io_enter(tag);rc = (call);io_leave(tag); \
     if (rc < 0) goto end; } while (0)
     memset(result, 0, sizeof(*result)); result->stage = "DNS_TCP"; result->http_phase = -1;
     if (strcmp(request->url, "https://retroachievements.org/dorequest.php")) return -35308;
+    if(dns_job.thread>=0)return -35424;
     memset(&address, 0, sizeof(address)); address.sin_family = AF_INET; address.sin_port = htons(443);
-    STEP(sceNetResolverCreate(&network.resolver_id, dns, sizeof(dns)));
-    STEP(sceNetResolverStartNtoA(network.resolver_id, "retroachievements.org", &address.sin_addr, 1, 1));
-    STEP(sceNetInetSocket(AF_INET, SOCK_STREAM, 0)); socket_fd = network.socket = rc;
-    STEP(sceNetInetSetsockopt(socket_fd, SOL_SOCKET, SO_NONBLOCK, &nonblock, sizeof(nonblock)));
+    STEP(IO_DNS_CREATE,sceNetResolverCreate(&network.resolver_id,dns_job.scratch,sizeof(dns_job.scratch)));
+    STEP(IO_DNS_LOOKUP,ra_dns_run(network.resolver_id,&address.sin_addr,dns));
+    STEP(IO_SOCKET,sceNetInetSocket(AF_INET, SOCK_STREAM, 0)); socket_fd = network.socket = rc;
+    result->stage="socket_setup";
+    STEP(IO_SOCKET_SETUP,ra_socket_nonblocking(socket_fd,socket_mode));
+    result->stage="DNS_TCP";
+    rc=transport_check();if(rc)goto end;
+    io_enter(IO_CONNECT);
     rc = sceNetInetConnect(socket_fd, (struct sockaddr*)&address, sizeof(address));
+    io_leave(IO_CONNECT);
     if (rc < 0) {
         error = sceNetInetGetErrno();
         if (error != EINPROGRESS && error != EALREADY && !retryable(error)) goto end;
         do {
-            SceNetInetPollfd fd = {socket_fd, SCE_NET_INET_POLLOUT, 0};
             rc = transport_check(); if (rc) goto end;
-            rc = sceNetInetPoll(&fd, 1, 50); if (rc < 0) goto end;
+            io_enter(IO_POLL);rc = ra_socket_poll(socket_fd,1,50);io_leave(IO_POLL);
+            if (rc < 0) {if(sceNetInetGetErrno()==EINTR){rc=0;continue;}goto end;}
         } while (!rc);
-        STEP(sceNetInetGetsockopt(socket_fd, SOL_SOCKET, SO_ERROR, &error, &error_size));
+        STEP(IO_CONNECT_ERROR,sceNetInetGetsockopt(socket_fd, SOL_SOCKET, SO_ERROR, &error, &error_size));
         if (error) { rc = MBEDTLS_ERR_NET_CONNECT_FAILED; goto end; }
     }
     memset(&options, 0, sizeof(options));
@@ -478,7 +546,7 @@ static int transport_http(const ra_session_request* request, ra_https_result* re
     options.ca_der = ra_tls_root; options.ca_size = sizeof(ra_tls_root); options.hostname = "retroachievements.org";
     options.post = request->post_data; options.post_size = request->post_size;
     options.body = response_body; options.capacity = RA_SESSION_RESPONSE_LIMIT; options.deadline_ms = transport_deadline;
-    rc = ra_https_post(&options, result);
+    io_enter(IO_TLS);rc = ra_https_post(&options, result);io_leave(IO_TLS);
     if (!rc && result->heap_remaining) rc = -35309;
 end:
     return rc;
@@ -487,12 +555,15 @@ end:
 static int transport_release_io(void)
 {
     int rc;
+    if(dns_job.thread>=0) {
+        rc=ra_dns_reap();if(rc)return rc<0?rc:-35424;
+    }
     if (network.socket >= 0) {
-        rc = sceNetInetClose(network.socket); if (rc < 0) return rc;
+        io_enter(IO_CLOSE);rc = sceNetInetClose(network.socket);io_leave(IO_CLOSE);if (rc < 0) return rc;
         network.socket = socket_fd = -1;
     }
     if (network.resolver_id >= 0) {
-        rc = sceNetResolverDelete(network.resolver_id); if (rc < 0) return rc;
+        io_enter(IO_DNS_DELETE);rc = sceNetResolverDelete(network.resolver_id);io_leave(IO_DNS_DELETE);if (rc < 0) return rc;
         network.resolver_id = -1;
     }
     return 0;
@@ -512,13 +583,17 @@ static int transport_worker(SceSize size, void* args)
     while (!transport_stopping && !control->stop) {
         ra_session_request request;
         transport_report finished;
+        uint64_t started;
         if (!ra_mail_take(&mailbox, &request)) { sceKernelDelayThread(20000); continue; }
         memset(&finished, 0, sizeof(finished));
+        finished.socket_mode.read_result=finished.dns.result=-35425;
         finished.ticket = request.ticket; finished.https.http_phase = -1;
+        finished.kind=request.kind; started=now_ms(NULL);
         transport_ticket = request.ticket; transport_deadline = request.deadline_ms;
         mbedtls_platform_zeroize(response_body, RA_SESSION_RESPONSE_LIMIT);
-        finished.code = transport_http(&request, &finished.https);
+        finished.code = transport_http(&request,&finished.https,&finished.socket_mode,&finished.dns);
         finished.io_cleanup = transport_release_io();
+        finished.elapsed_ms=(unsigned)(now_ms(NULL)-started);
         if (finished.io_cleanup < 0 && !finished.code) finished.code = finished.io_cleanup;
         finished.retryable=transport_retry(&finished);
         /* Publish immutable response; owner copies it and delivers callbacks. */
@@ -528,6 +603,12 @@ static int transport_worker(SceSize size, void* args)
             control->result = -35403; control->stop = 1;
         }
         if (finished.io_cleanup < 0) { control->result = finished.io_cleanup; control->stop = 1; }
+    }
+    /* Never allow stop_transport to acknowledge while DNS still owns module
+     * memory or a resolver. On failure owner retains all dependencies. */
+    while(dns_job.thread>=0) {
+        if(!ra_dns_reap())break;
+        sceKernelDelayThread(20000);
     }
     transport_done = 1;
     return 0;
@@ -731,6 +812,7 @@ login_again:
         rc = check(); if (rc) goto done;
         ra_session_get_stats(runtime, &stats);
         if (!stats.auth_pending) break;
+        startup_progress("LOGIN",&stats);
         sceKernelDelayThread(20000);
     } while (1);
     ra_probe_log_printf(&logger, "SESSION_LOGIN result=%d logged_in=%d spectator=%d hardcore=%d\n",
@@ -750,8 +832,10 @@ load_again:
         rc = check(); if (rc) goto done;
         ra_session_get_stats(runtime, &stats);
         if (!stats.load_pending) break;
+        startup_progress("LOAD",&stats);
         sceKernelDelayThread(20000);
     } while (1);
+    drain_request_trace();
     if(stats.last_result || !stats.game_loaded) {
         rc=startup_delay("LOAD",&failures,&stats);if(rc)goto done;goto load_again;
     }
@@ -771,7 +855,7 @@ load_again:
         ui_render_valid=0;ui_network_pending=0;
         ui_notice=(ra_ui_notice){5,0,0};ui_notice_until=now_ms(NULL)+3500;++ui_notice_serial;
         record("prepare UI",rc);heap_mark("ui_prepare");
-        if(!rc)rc = observe_game();
+        if(!rc){log_stage("catalog_ready",0);rc = observe_game();}
     }
 done:
     ra_auth_erase(&auth, sizeof(auth));
@@ -790,6 +874,9 @@ static int worker(SceSize size, void* args)
     log_fd=sceIoOpen(RA_CLIENT_DIR "client-user.log",PSP_O_WRONLY|PSP_O_CREAT|PSP_O_TRUNC,0666);
     if(log_fd<0){control->result=log_fd;control->done=1;return 0;}
     ra_probe_log_init(&logger,log_write,NULL);
+    log_session=control->log_session;
+    ra_probe_log_printf(&logger,"LOG_SESSION id=%u component=user\n",(unsigned)log_session);
+    log_stage("user_worker_enter",0);
     ra_probe_log_printf(&logger,"client_version=%s input method runtime probe; frames=DISABLED no_award=1\n",RA_CLIENT_VERSION);
     rc=run_runtime_probe();
     if(logger.error && !rc)rc=logger.error;
@@ -814,13 +901,18 @@ static int worker(SceSize size, void* args)
     log_fd = sceIoOpen(RA_CLIENT_DIR "client-user.log", PSP_O_WRONLY | PSP_O_CREAT | PSP_O_TRUNC, 0666);
     if (log_fd < 0) { rc = log_fd; goto done; }
     ra_probe_log_init(&logger, log_write, NULL);
+    log_session=control->log_session;
+    ra_probe_log_printf(&logger,"LOG_SESSION id=%u component=user\n",(unsigned)log_session);
+    log_stage("user_worker_enter",0);
     log_sync_next=now_ms(NULL)+5000u;
     ra_probe_log_printf(&logger, "client_version=%s online client; mode_marker=REQUIRED_FOR_AWARDS\n", RA_CLIENT_VERSION);
 #if RA_CLIENT_RUNTIME_PROBE_ONLY
     rc=run_runtime_probe();goto done;
 #endif
     memory_mark("libc_init", "before");
+    log_stage("libc_init_begin",0);
     __libcglue_init(1, argv); libc_ready = 1;
+    log_stage("libc_init_end",0);
     memory_mark("libc_init", "after");
     memory_mark("rc_client_create", "before");
     queue_guard = sceKernelCreateSema("RASessionQueue", 0, 1, 1, NULL);
@@ -851,7 +943,9 @@ static int worker(SceSize size, void* args)
     if (rc) goto done;
     wifi = record("read explicit WiFi profile", profile()); if (wifi < 0) { rc = wifi; goto done; }
     deadline = now_ms(NULL) + 20000;
+    log_stage("early_network_begin",0);
     rc = prepare_early_network(); if (rc) goto done;
+    log_stage("early_network_end",0);
     transport_thread = sceKernelCreateThread("RASessionHTTP", transport_worker, 0x60, 32768, PSP_THREAD_ATTR_USER, NULL);
     if (transport_thread < 0) { rc = transport_thread; goto done; }
     rc = sceKernelStartThread(transport_thread, 0, NULL);
@@ -860,7 +954,9 @@ static int worker(SceSize size, void* args)
     ra_probe_log_printf(&logger, "EARLY_NETWORK_READY user_free=%u largest=%u request=WAITING connect=DEFERRED\n",
         (unsigned)sceKernelTotalFreeMemSize(), (unsigned)sceKernelMaxFreeMemSize());
     heap_mark("early_ready");
+    log_stage("request_release_wait",0);
     rc = wait_request_release(); if (rc) goto done;
+    log_stage("request_release_received",0);
     if (RA_CLIENT_STATIC_AUDIT_ONLY) {
         ra_probe_log_printf(&logger,"STATIC_AUDIT_ONLY complete=1 auth_read=0 requests=0 frames=0 binding=UNPROVEN\n");
         goto done;
@@ -873,17 +969,26 @@ static int worker(SceSize size, void* args)
     /* Network, module image, stack and libc heap remain owned during the
      * game's startup. Only now read the disc and start the HTTPS request. */
     deadline = now_ms(NULL) + 100000;
+    log_stage("disc_hash_begin",0);
     rc = record("disc0 hash matches official PC result", disc_hash(hash)); if (rc) goto done;
+    log_stage("disc_hash_end",0);
     ra_probe_log_printf(&logger, "HTTPS_READY heap=%u stack=%u user_free=%u largest=%u\n", RA_CLIENT_HEAP_BYTES,
         RA_CLIENT_STACK_BYTES, (unsigned)sceKernelTotalFreeMemSize(), (unsigned)sceKernelMaxFreeMemSize());
+    log_stage("online_session_begin",0);
     rc = run_session(wifi, hash);
 done:
+    log_lifecycle=1;
+    log_stage("user_cleanup_begin",rc);
     engine_stop();
     wifi_enabled=0;__atomic_store_n(&wifi_online,0,__ATOMIC_RELEASE);
-    ra_probe_log_printf(&logger,"STOP_DIAGNOSTIC module_stop=%u power_flags=0x%08X home_seen=%u\n",stop_from_module,power_stop_flags,ui_home_seen);
+    ra_probe_log_printf(&logger,"STOP_DIAGNOSTIC module_stop=%u power_flags=0x%08X home_seen=%u exit_user_flags=%u\n",stop_from_module,power_stop_flags,ui_home_seen,(unsigned)control->exit_user_flags);
+    log_stage("ui_shutdown_begin",0);
     cleanup_error = ui_shutdown();
+    log_stage("ui_shutdown_end",cleanup_error);
     if(cleanup_error<0)goto finish;
+    log_stage("transport_stop_begin",0);
     cleanup_error = stop_transport();
+    log_stage("transport_stop_end",cleanup_error);
     if (log_fd >= 0) record("stop HTTPS transport", cleanup_error);
     if (cleanup_error < 0) goto finish; /* Retain every object a live thread may reference. */
     if (runtime && !ra_mail_cancel_joined(&mailbox, runtime)) { cleanup_error = -35403; goto finish; }
@@ -917,10 +1022,12 @@ done:
     cleanup_error = release_apctl_observer(cleanup_error);
     if (!cleanup_error) cleanup_error = ra_probe_power_release(&power_owner, &power_api);
 finish:
+    log_stage("user_cleanup_end",cleanup_error);
     if (logger.error && !rc) rc = logger.error;
     if (control->result && (!rc || rc == RA_HTTPS_CANCEL)) rc = control->result;
     if (log_fd >= 0) {
         ra_probe_log_printf(&logger, "client_finished result=%d cleanup_result=%d log_error=0x%08X sync_calls=%u sync_max_ms=%u sync_last=0x%08X\n", rc, cleanup_error, (unsigned)logger.error,log_sync_calls,log_sync_max_ms,(unsigned)log_sync_last_result);
+        log_stage("user_log_sync_close",cleanup_error < 0 ? cleanup_error : rc);
         int sync_rc=sync_logs(1); if(sync_rc<0 && !cleanup_error)cleanup_error=sync_rc;
         int close_rc = sceIoClose(log_fd); if (close_rc < 0) cleanup_error = close_rc; else log_fd = -1;
     }
@@ -951,3 +1058,5 @@ int module_start(SceSize size, void* args)
 #include "stop_owner.h"
 int module_stop(SceSize size, void* args)
 { (void)size; (void)args;__atomic_store_n(&stop_from_module,1,__ATOMIC_RELEASE);return https_stop_owner(); }
+int module_reboot_before(SceSize size, void* args)
+{ (void)size; (void)args; return https_reboot_before(); }

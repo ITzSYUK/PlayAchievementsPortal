@@ -37,7 +37,16 @@ static void reset(void)
 }
 int main(void)
 {
+    reset();shared.done=0;
+    assert(https_reboot_before()==0 && shared.stop && shared.exit_user_flags==RA_EXIT_USER_REBOOT);
+    assert(!mock.waits && !mock.deletes && !mock.refers && control==&shared && thread_id==37);
+    assert(https_reboot_before()==0 && shared.exit_user_flags==RA_EXIT_USER_REBOOT);
+    shared.done=1;assert(https_stop_owner()==0);
+    assert(shared.exit_user_flags==(RA_EXIT_USER_REBOOT|RA_EXIT_USER_STOP));
+    reset();shared.done=0;assert(https_reboot_before()==0);
+    control=NULL;assert(https_reboot_before()==0 && !mock.waits);
     reset(); assert(https_stop_owner() == 0 && thread_id == -1 && control == NULL);
+    assert(shared.exit_user_flags==RA_EXIT_USER_STOP);
     assert(shared.stop_stage == RA_STOP_FINISHED && shared.stop_wait_result == 0 && shared.stop_delete_result == 0);
     assert(shared.result == -35305 && shared.stop_timeout_us == 2900000 && mock.waits == 1 && mock.deletes == 1);
     reset(); mock.wait_rc = (int)UINT32_C(0x800200D2);

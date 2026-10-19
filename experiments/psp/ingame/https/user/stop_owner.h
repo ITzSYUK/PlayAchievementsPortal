@@ -1,5 +1,16 @@
 #ifndef RA_HTTPS_STOP_OWNER_H
 #define RA_HTTPS_STOP_OWNER_H
+/* Called by LoadExec while ModuleMgr may hold its mutex. Signal only: an
+ * owner join could deadlock on a module operation in startup/network cleanup. */
+static int https_reboot_before(void)
+{
+    ra_client_control* shared = control;
+    if (shared) {
+        __atomic_fetch_or(&shared->exit_user_flags, RA_EXIT_USER_REBOOT, __ATOMIC_RELEASE);
+        __atomic_store_n(&shared->stop, 1, __ATOMIC_RELEASE);
+    }
+    return 0;
+}
 /* Included by the PSP worker and a host failure-injection test. Uses only
  * ThreadMan and the live control block, never libc or the closed log. */
 static int https_stop_owner(void)
@@ -9,6 +20,7 @@ static int https_stop_owner(void)
     SceKernelThreadInfo info;
     int rc, wait_rc;
     if (!shared) return thread_id < 0 ? 0 : -35312;
+    __atomic_fetch_or(&shared->exit_user_flags, RA_EXIT_USER_STOP, __ATOMIC_RELEASE);
     shared->stop = 1;
     shared->owner_thread_id = thread_id;
     shared->stop_caller_id = sceKernelGetThreadId();

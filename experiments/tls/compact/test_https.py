@@ -33,6 +33,7 @@ def main():
             ('clock unavailable', valid, {'utc_epoch': -1}, 1),
             ('entropy unavailable', valid, {'entropy_failure': True}, 1),
             ('handshake deadline', valid, {'silent': True, 'timeout': 200}, 1),
+            ('timeout cleanup then fresh retry', valid, {'retry': True, 'timeout': 200}, 0),
             ('body overflow', valid, {'response': b'HTTP/1.1 200 OK\r\nContent-Length: 262145\r\n\r\n'}, 1),
             ('PSP observed chunk', valid, {'response': b'HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n' + f'{129891:x}\r\n'.encode() + b'x' * 129891 + b'\r\n0\r\n\r\n'}, 0),
             ('maximum length body', valid, {'response': b'HTTP/1.1 200 OK\r\nContent-Length: 262144\r\n\r\n' + b'x' * 262144}, 0),
@@ -49,6 +50,7 @@ def main():
             ('body deadline', valid, {'response': b'HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nOK', 'slow': True, 'timeout': 200}, 1),
         ]
         diagnostics = {
+            'timeout cleanup then fresh retry': ['RETRY_AFTER_TIMEOUT code=-35203 remaining=0', 'probe_code=0'],
             'body overflow': ['probe_code=-35202', 'http_status=200', 'error=body_limit', 'declared=262145', 'received=0'],
             'PSP observed chunk': ['error=none', 'received=129891', 'chunks=1'],
             'maximum length body': ['error=none', 'received=262144', 'declared=262144'],
@@ -68,6 +70,8 @@ def main():
         for label, pair, options, expected in cases:
             process, state, elapsed = run(binary, pair, ca_file, **options)
             assert process.returncode == expected, (label, process.stdout, process.stderr)
+            if options.get('retry'):
+                assert state.get('first_closed') and state['request_received'] and elapsed < 4, (label, state, elapsed)
             if label in ('wrong hostname', 'expired', 'untrusted', 'clock unavailable', 'entropy unavailable'):
                 assert not state['request_received'], label
             if 'deadline' in label:

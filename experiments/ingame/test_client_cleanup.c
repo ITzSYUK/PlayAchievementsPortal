@@ -43,6 +43,9 @@ static struct {
     unsigned starts, stops, unloads, frees, log_length, user_free, seconds;
     int timed_worker;
     unsigned done_second;
+    int exit_open_error, exit_write_mode, exit_close_error, exit_reenter, append_error;
+    unsigned exit_opens, exit_writes, exit_closes, joins, exit_length;
+    char exit_log[2048];
     char log[32768];
 } mock;
 static void reset(void)
@@ -58,6 +61,11 @@ static void reset(void)
     game_test.text_size = 128; game_test.segmentsize[0] = 4096; game_test.nsegment = 1;
 #endif
     stopping = 0; control = &shared_test; child = 42; block = 43; start_attempted = 1; thread_id = 44; log_fd = -1;
+#ifdef RA_CLIENT_HTTPS
+    log_lifecycle=0;log_session=0;
+    exit_notice_bytes=0;exit_notice_busy=0;exit_notice_last_result=0;
+    exit_log_ready=1;
+#endif
     observer_result = 0; partition_size = RA_CLIENT_USER_SIZE;
 #ifdef RA_CLIENT_HTTPS
     mock.user_free = 29379072;
@@ -103,16 +111,29 @@ int sceKernelFreePartitionMemory(int uid)
     return mock.free_error;
 }
 int sceKernelWaitThreadEnd(int uid, SceUInt* timeout)
-{ assert(uid == 44 && *timeout == 5000000); return mock.join_error; }
+{ assert(uid == 44 && *timeout == 5000000); ++mock.joins; return mock.join_error; }
 int sceKernelDeleteThread(int uid) { assert(uid == 44); return mock.delete_error; }
 int sceIoWrite(int fd, const void* data, unsigned size)
 {
-    assert(mock.capture && fd == 1);
+#ifdef RA_CLIENT_HTTPS
+    if (fd==2) {
+        ++mock.exit_writes;
+        if(mock.exit_reenter)assert(exit_notice("nested",0)==-1);
+        if(mock.exit_write_mode==2)return 0;
+        if(mock.exit_write_mode==3)return -71;
+        if(mock.exit_write_mode==4)return (int)size+1;
+        if(mock.exit_write_mode==1 && size>7)size=7;
+        assert(size<sizeof(mock.exit_log)-mock.exit_length);
+        memcpy(mock.exit_log+mock.exit_length,data,size);mock.exit_length+=size;
+        mock.exit_log[mock.exit_length]=0;return (int)size;
+    }
+#endif
+    assert(mock.capture && (fd == 1 || fd == 3));
     assert(size < sizeof(mock.log) - mock.log_length);
     memcpy(mock.log + mock.log_length, data, size); mock.log_length += size;
     mock.log[mock.log_length] = 0; return (int)size;
 }
-int sceIoClose(int fd) { (void)fd; return 0; }
+int sceIoClose(int fd) { if(fd==2){++mock.exit_closes;return mock.exit_close_error;} return 0; }
 int sceKernelQueryMemoryPartitionInfo(int pid, PspSysmemPartitionInfo* info)
 {
     assert(pid == 2); info->startaddr = 0x08800000; info->memsize = partition_size;
@@ -175,7 +196,27 @@ int sceKernelDelayThread(unsigned us)
     ++mock.seconds; return 0;
 }
 int sceIoOpen(const char* path, int flags, int mode)
-{ assert(!strcmp(path, RA_CLIENT_DIR "client-bootstrap.log")); (void)flags; (void)mode; return 1; }
+{
+    if (flags == PSP_O_RDONLY) return (int)UINT32_C(0x80010002);
+    if(flags==(PSP_O_WRONLY|PSP_O_APPEND)) {
+        assert(!strcmp(path,RA_CLIENT_DIR "client-bootstrap.log") && mode==0);
+#ifdef RA_CLIENT_HTTPS
+        if(!exit_notice_busy)return mock.append_error ? mock.append_error : 3;
+#endif
+        ++mock.exit_opens;return mock.exit_open_error ? mock.exit_open_error : 2;
+    }
+#ifdef RA_CLIENT_HTTPS
+    assert((flags & PSP_O_TRUNC) && !(flags & PSP_O_APPEND));
+#endif
+    assert(!strcmp(path, RA_CLIENT_DIR "client-bootstrap.log")); (void)mode; return 1;
+}
+int sceIoRead(int fd, void* bytes, unsigned size)
+{ (void)fd; (void)bytes; (void)size; assert(0); return -1; }
+int sceIoRemove(const char* path)
+{ (void)path; return (int)UINT32_C(0x80010002); }
+int sceIoRename(const char* source, const char* target)
+{ (void)source; (void)target; return (int)UINT32_C(0x80010002); }
+unsigned sceKernelGetSystemTimeLow(void) { return mock.seconds*1000000u; }
 static void prepare_start(void)
 {
     reset(); child = block = -1; control = NULL; start_attempted = 0;
@@ -363,6 +404,10 @@ int main(void)
     assert(mock.stops == 1 && mock.unloads == 1 && mock.frees == 1);
     assert(strstr(mock.log, "client start status: 0xFFFFFFFF"));
 #ifdef RA_CLIENT_HTTPS
+    assert(control==NULL && mapped_control->log_session==1);
+    assert(strstr(mock.log,"LOG_SESSION id=1 component=bootstrap"));
+    assert(strstr(mock.log,"stage=user_start_begin") < strstr(mock.log,"stage=user_start_end result=-2147352575"));
+    assert(strstr(mock.log,"stage=bootstrap_cleanup_begin") < strstr(mock.log,"stage=bootstrap_cleanup_end result=0"));
     assert(strstr(mock.log, "memory phase=after_cleanup second=0 user_free=29379072"));
 #else
     assert(strstr(mock.log, "memory phase=after_cleanup second=10 user_free=864512"));
@@ -453,6 +498,58 @@ int main(void)
     assert(module_stop(0, NULL) == 0 && child == -1 && block == -1);
 #endif
     assert(munmap(mapped_control, 4096) == 0);
+#ifdef RA_CLIENT_HTTPS
+    reset();mock.capture=1;log_fd=1;written=RA_CLIENT_BOOT_LOG_LIMIT-RA_CLIENT_EXIT_LOG_RESERVE-RA_LOG_STOP_RESERVE;
+    ra_probe_log_init(&logger,log_write,NULL);log_session=9;
+    assert(ra_probe_log_printf(&logger,"ordinary diagnostics dropped\n"));
+    assert(mock.log_length==0);
+    log_stage("bootstrap_cleanup_end",-99);
+    assert(strstr(mock.log,"LIFECYCLE session=9 uptime_us32=0 stage=bootstrap_cleanup_end result=-99"));
+    assert(written<=RA_CLIENT_BOOT_LOG_LIMIT);
+    written=RA_CLIENT_BOOT_LOG_LIMIT;log_lifecycle=1;
+    { unsigned length=mock.log_length;log_stage("full",0);assert(mock.log_length==length && !logger.error); }
+    /* Reboot notification survives a failed/closed normal logger, never waits
+     * for suspended users or calls cleanup/ModuleMgr. Flags distinguish the
+     * user notification from worker cleanup completion. */
+    reset();log_session=7;shared_test.magic=RA_CLIENT_MAGIC;shared_test.size=sizeof(shared_test);
+    shared_test.exit_user_flags=RA_EXIT_USER_REBOOT;logger.write=NULL;logger.error=-88;
+    assert(module_reboot_phase(1,NULL,0,0)==0 && module_reboot_phase(2,NULL,0,0)==0);
+    assert(module_reboot_phase(99,NULL,0,0)==0 && !mock.exit_opens && !mock.joins);
+    mock.exit_write_mode=1;mock.exit_reenter=1;
+    assert(module_reboot_phase(3,NULL,0,0)==0);
+    assert(strstr(mock.exit_log,"EXIT_NOTICE session=7") && strstr(mock.exit_log,"source=kernel_reboot_phase3"));
+    assert(strstr(mock.exit_log,"user_flags=1 worker_done=0") && mock.exit_writes>1);
+    assert(mock.exit_opens==1 && mock.exit_closes==1);
+    assert(!mock.joins && !mock.stops && !mock.unloads && !mock.frees && control==&shared_test);
+    assert(!exit_notice_busy && !exit_notice_last_result && logger.error==-88);
+    reset();assert(module_reboot_phase(3,NULL,0,0)==0 && !mock.exit_opens);
+    reset();log_session=8;mock.exit_open_error=-72;
+    assert(module_reboot_phase(3,NULL,0,0)==0 && exit_notice_last_result==-72 && !mock.exit_closes);
+    reset();log_session=8;mock.exit_write_mode=2;
+    assert(module_reboot_phase(3,NULL,0,0)==0 && exit_notice_last_result==-1 && mock.exit_closes==1);
+    reset();log_session=8;mock.exit_write_mode=3;
+    assert(module_reboot_phase(3,NULL,0,0)==0 && exit_notice_last_result==-71 && mock.exit_closes==1);
+    reset();log_session=8;mock.exit_write_mode=4;
+    assert(module_reboot_phase(3,NULL,0,0)==0 && exit_notice_last_result==-1 && mock.exit_closes==1);
+    reset();log_session=8;mock.exit_close_error=-73;
+    assert(module_reboot_phase(3,NULL,0,0)==0 && exit_notice_last_result==-73);
+    prepare_start();mock.append_error=-89;
+    assert(observer(0,NULL)==0 && observer_result==-89 && !mock.starts && !exit_log_ready);
+    assert(strstr(mock.log,"LOG_SESSION id=1 component=bootstrap") && strstr(mock.log,"open bootstrap append: 0xFFFFFFA7"));
+    assert(!mock.exit_opens && !mock.unloads && !mock.frees);
+    reset();log_session=9;mock.join_error=-66;
+    assert(module_stop(0,NULL)==-66 && mock.joins==1);
+    assert(strstr(mock.exit_log,"source=kernel_module_stop_enter result=0") &&
+        strstr(mock.exit_log,"source=kernel_module_stop_wait result=-66"));
+    assert(!mock.stops && !mock.unloads && !mock.frees);
+    reset();log_session=10;written=RA_CLIENT_BOOT_LOG_LIMIT-RA_CLIENT_EXIT_LOG_RESERVE;
+    mock.capture=1;log_fd=1;log_lifecycle=1;ra_probe_log_init(&logger,log_write,NULL);
+    log_stage("ordinary_stop_limit",0);assert(!mock.log_length && !logger.error);
+    for(unsigned i=0;i<30;++i)assert(module_reboot_phase(3,NULL,0,0)==0);
+    assert(exit_notice_bytes<=RA_CLIENT_EXIT_LOG_RESERVE && mock.exit_length<=exit_notice_bytes);
+    assert(written+exit_notice_bytes<=RA_CLIENT_BOOT_LOG_LIMIT && mock.exit_opens<30);
+    puts("PASS exit notices: reboot/early module_stop, no ModuleMgr/join in reboot, independent append, partial/invalid I/O, reentry, 128KiB budget");
+#endif
     puts("PASS client lifecycle: SMOption privilege, failed start/NOT_STARTED cleanup, early timestamp, retain/retry on uncertain stop");
     return 0;
 }

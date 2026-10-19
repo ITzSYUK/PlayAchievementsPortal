@@ -11,7 +11,7 @@
 #define RA_SESSION_URL "https://retroachievements.org/dorequest.php"
 enum { EMPTY, QUEUED, ACTIVE, COMPLETE };
 typedef struct {
-    unsigned state, ticket;
+    unsigned state, ticket, kind;
     unsigned award_id;
     char* post;
     size_t post_size;
@@ -28,6 +28,8 @@ struct ra_client_session {
     session_slot slots[RA_SESSION_SLOTS];
     ra_session_stats stats;
     unsigned next_ticket;
+    ra_request_trace request_trace[RA_REQUEST_TRACE_CAPACITY];
+    unsigned trace_read, trace_write;
     int stopping, auth_pending, load_pending;
     int online_softcore;
     unsigned encore, encore_ready, initial_unlocked_count;
@@ -310,6 +312,29 @@ static unsigned award_id(const char* post)
     }
     return (*p == '&' || !*p) ? id : 0;
 }
+/* Caller holds the adapter lock. Timestamp arithmetic intentionally wraps at
+ * 32-bit milliseconds; request lifetimes are bounded to 30 seconds. */
+static void request_trace(ra_client_session* s, const session_slot* slot, unsigned stage)
+{
+    ra_request_trace* event;
+    unsigned now=(unsigned)s->config.now_ms(s->config.context);
+    if(s->trace_write-s->trace_read==RA_REQUEST_TRACE_CAPACITY) {
+        ++s->trace_read; ++s->stats.request_trace_dropped;
+    }
+    event=&s->request_trace[s->trace_write++ % RA_REQUEST_TRACE_CAPACITY];
+    *event=(ra_request_trace){slot->ticket,slot->kind,stage,now,
+        now-(unsigned)(slot->deadline_ms-RA_SESSION_TIMEOUT_MS),slot->status};
+}
+int ra_session_take_request_trace(ra_client_session* s, ra_request_trace* output)
+{
+    int found=0;
+    if(!s || !output)return 0;
+    lock(s);
+    if(s->trace_read!=s->trace_write) {
+        *output=s->request_trace[s->trace_read++ % RA_REQUEST_TRACE_CAPACITY]; found=1;
+    }
+    unlock(s);return found;
+}
 static void RC_CCONV server_call(const rc_api_request_t* request, rc_client_server_callback_t callback,
     void* data, rc_client_t* client)
 {
@@ -352,8 +377,13 @@ static void RC_CCONV server_call(const rc_api_request_t* request, rc_client_serv
             slot->ticket = ++s->next_ticket;
             if (!slot->ticket) slot->ticket = ++s->next_ticket;
             slot->deadline_ms = s->config.now_ms(s->config.context) + RA_SESSION_TIMEOUT_MS;
+            slot->kind = !strncmp(request->post_data,"r=login2&",9)?RA_REQUEST_LOGIN:
+                !strncmp(request->post_data,"r=achievementsets&",18)?RA_REQUEST_SET:
+                !strncmp(request->post_data,"r=startsession&",15)?RA_REQUEST_START:
+                !strncmp(request->post_data,"r=ping&",7)?RA_REQUEST_PING:RA_REQUEST_AWARD;
             slot->state = QUEUED;
             ++s->stats.pending; ++s->stats.submitted;
+            request_trace(s,slot,RA_REQUEST_QUEUED);
             unlock(s); return;
         }
     }
@@ -461,7 +491,9 @@ int ra_session_take_request(ra_client_session* s, ra_session_request* output)
         if (slot->state != QUEUED) continue;
         slot->state = ACTIVE;
         output->ticket = slot->ticket; output->url = RA_SESSION_URL;
+        output->kind = slot->kind;
         output->post_data = slot->post; output->post_size = slot->post_size; output->deadline_ms = slot->deadline_ms;
+        request_trace(s,slot,RA_REQUEST_OFFERED);
         unlock(s); return 1;
     }
     unlock(s); return 0;
@@ -511,6 +543,7 @@ int ra_session_complete(ra_client_session* s, unsigned ticket, int status, const
             else s->stats.last_copy_error = RA_SESSION_COPY_NO_MEMORY;
         }
         slot->state = COMPLETE;
+        request_trace(s,slot,RA_REQUEST_RESPONSE);
         unlock(s); return 1;
     }
     unlock(s); return 0;
@@ -526,6 +559,7 @@ static void pump(ra_client_session* s)
         if (s->slots[i].state == QUEUED && s->config.now_ms(s->config.context) >= s->slots[i].deadline_ms) {
             s->slots[i].status = s->stopping?RC_API_SERVER_RESPONSE_CLIENT_ERROR:RC_API_SERVER_RESPONSE_RETRYABLE_CLIENT_ERROR;
             s->slots[i].state = COMPLETE;
+            request_trace(s,&s->slots[i],RA_REQUEST_RESPONSE);
         }
         if (s->slots[i].state != COMPLETE) { unlock(s); continue; }
         done = s->slots[i]; memset(&s->slots[i], 0, sizeof(s->slots[i]));
@@ -535,6 +569,7 @@ static void pump(ra_client_session* s)
         --s->stats.pending; ++s->stats.completed;
         erase_free(done.post, done.post_size + 1);
         s->stats.buffer_bytes -= post_bytes;
+        request_trace(s,&done,RA_REQUEST_CALLBACK_BEGIN);
         unlock(s);
         response.body = done.body ? done.body : ""; response.body_length = done.body_size; response.http_status_code = done.status;
         if (done.award_id && response.http_status_code == 200) {
@@ -551,6 +586,7 @@ static void pump(ra_client_session* s)
             rc_api_destroy_award_achievement_response(&award);
         }
         done.callback(&response, done.callback_data);
+        lock(s);request_trace(s,&done,RA_REQUEST_CALLBACK_END);unlock(s);
         erase_free(done.body, done.body_size + 1);
         lock(s); s->stats.buffer_bytes -= body_bytes; unlock(s);
     }

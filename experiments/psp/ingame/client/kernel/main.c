@@ -64,12 +64,22 @@ static int probe_hook_installed;
 static int probe_was_installed;
 #endif
 static ra_probe_log logger;
+#ifdef RA_CLIENT_HTTPS
+#include "log_history.h"
+#include "log_lifecycle.h"
+#include "../../https/kernel/exit_notice.h"
+#endif
 static unsigned written;
 static int log_write(const void* data, unsigned size, void* unused)
 {
     int rc;
     (void)unused;
-    if (size > RA_CLIENT_BOOT_LOG_LIMIT - written) return (int)size;
+#ifdef RA_CLIENT_HTTPS
+    unsigned limit = RA_CLIENT_BOOT_LOG_LIMIT - RA_CLIENT_EXIT_LOG_RESERVE - (log_lifecycle ? 0 : RA_LOG_STOP_RESERVE);
+#else
+    unsigned limit = RA_CLIENT_BOOT_LOG_LIMIT;
+#endif
+    if (written >= limit || size > limit - written) return (int)size;
     rc = sceIoWrite(log_fd, data, size);
     if (rc > 0) written += (unsigned)rc;
     return rc;
@@ -348,6 +358,7 @@ static int start_client(unsigned second)
     }
     memset(control, 0, sizeof(*control)); control->magic = RA_CLIENT_MAGIC; control->size = sizeof(*control);
 #ifdef RA_CLIENT_HTTPS
+    control->log_session = log_session;
     control->owner_thread_id = control->stop_caller_id = -1;
     control->stop_wait_result = control->stop_delete_result = RA_STOP_PENDING;
     control->stop_refer_result = RA_STOP_PENDING;
@@ -356,7 +367,13 @@ static int start_client(unsigned second)
     memset(&load, 0, sizeof(load)); load.size = sizeof(load);
     load.mpidtext = load.mpiddata = 2; load.position = 1; load.access = 1;
     if (stopping || logger.error) return -35106;
+#ifdef RA_CLIENT_HTTPS
+    log_stage("user_load_begin", 0);
+#endif
     child = record("load client user", sceKernelLoadModule(RA_CLIENT_DIR "RAClientUser.prx", 0, &load));
+#ifdef RA_CLIENT_HTTPS
+    log_stage("user_load_end", child);
+#endif
     if (child < 0) return child;
     rc = validate_child(); if (rc < 0) return rc;
     rc = snapshot("after_load", second, &total); if (rc < 0) return rc;
@@ -368,7 +385,13 @@ static int start_client(unsigned second)
         start.mpidstack, (unsigned)start.stacksize, start.priority, start.attribute);
     if (logger.error) return logger.error;
     start_attempted = 1;
+#ifdef RA_CLIENT_HTTPS
+    log_stage("user_start_begin", 0);
+#endif
     rc = record("start client user", sceKernelStartModule(child, sizeof(args), &args, &status, &start));
+#ifdef RA_CLIENT_HTTPS
+    log_stage("user_start_end", rc < 0 ? rc : status);
+#endif
     record("client start status", status);
     return rc < 0 ? rc : status;
 }
@@ -377,9 +400,40 @@ static int observer(SceSize args, void* argp)
     unsigned tries, second = 0;
     int result = 0, cleanup_result, memory_result;
     (void)args; (void)argp;
+#ifdef RA_CLIENT_HTTPS
+    exit_log_ready = 0;
+    result = ra_log_begin_history(&log_session);
+    if (result < 0) { observer_result = result; return 0; }
+#endif
+    /* Keep the hardware-proven 0.42 creation flags. APPEND is a separate
+     * open, so failure remains visible in the newly created session log. */
     log_fd = sceIoOpen(RA_CLIENT_DIR "client-bootstrap.log", PSP_O_WRONLY | PSP_O_CREAT | PSP_O_TRUNC, 0666);
     if (log_fd < 0) { observer_result = log_fd; return 0; }
     ra_probe_log_init(&logger, log_write, NULL);
+#ifdef RA_CLIENT_HTTPS
+    ra_probe_log_printf(&logger, "LOG_SESSION id=%u component=bootstrap\n", (unsigned)log_session);
+    {
+        int append_fd, close_rc;
+        log_stage("bootstrap_append_begin", 0);
+        append_fd = record("open bootstrap append", sceIoOpen(RA_CLIENT_DIR "client-bootstrap.log", PSP_O_WRONLY | PSP_O_APPEND, 0));
+        if (append_fd < 0 || logger.error) {
+            observer_result = append_fd < 0 ? append_fd : logger.error;
+            if (append_fd >= 0) sceIoClose(append_fd);
+            if (sceIoClose(log_fd) >= 0) log_fd = -1;
+            return 0;
+        }
+        close_rc = sceIoClose(log_fd);
+        if (close_rc < 0) {
+            record("close bootstrap initial descriptor", close_rc);
+            sceIoClose(append_fd); observer_result = close_rc; return 0;
+        }
+        log_fd = append_fd;
+        __sync_synchronize(); exit_log_ready = 1;
+        log_stage("bootstrap_append_ready", 0);
+    }
+    log_stage("bootstrap_observer_enter", 0);
+    log_stage("game_module_wait", 0);
+#endif
     ra_probe_log_printf(&logger, "client_version=%s target=LocoRoco runtime=%s mode=USER_LOG hardcore=0\n", RA_CLIENT_VERSION, RA_CLIENT_RUNTIME);
     ra_probe_log_printf(&logger, "module_limit=%u heap=%u owner_stack=%u entry_stack=%u free_floor=%u frames=CANDIDATE\n",
         RA_CLIENT_MODULE_LIMIT, RA_CLIENT_HEAP_BYTES, RA_CLIENT_STACK_BYTES, RA_CLIENT_ENTRY_STACK, RA_CLIENT_FREE_FLOOR);
@@ -394,6 +448,9 @@ static int observer(SceSize args, void* argp)
     }
     if (tries == 120 || stopping) { result = -35106; goto done; }
 #ifdef RA_CLIENT_HTTPS
+    log_stage("game_module_found", 0);
+#endif
+#ifdef RA_CLIENT_HTTPS
     for (second = 0; !stopping; ++second) {
 #else
     for (second = 0; second <= RA_CLIENT_OBSERVE_SECONDS && !stopping; ++second) {
@@ -403,6 +460,7 @@ static int observer(SceSize args, void* argp)
         if (second == RA_CLIENT_LOAD_SECOND) { result = start_client(second); if (result != 0) break; }
 #ifdef RA_CLIENT_HTTPS
         if (second >= RA_CLIENT_REQUEST_SECOND && control && !control->request_allowed) {
+            log_stage("game_map_publish_begin", 0);
             result = publish_game_map(); if (result) break;
 #if RA_CLIENT_HOOK_ENABLED
             result = install_runtime_probe(); if (result) break;
@@ -412,6 +470,7 @@ static int observer(SceSize args, void* argp)
             }
 #endif
             control->request_allowed = 1;
+            log_stage("request_released", 0);
             ra_probe_log_printf(&logger, "HTTPS_REQUEST_RELEASE second=%u network_ready=%u\n", second, (unsigned)control->ready);
         }
         if (control && control->request_allowed && !control->done) {
@@ -432,11 +491,22 @@ static int observer(SceSize args, void* argp)
         sceKernelDelayThread(1000000);
     }
 done:
+#ifdef RA_CLIENT_HTTPS
+    log_lifecycle = 1;
+    log_stage(stopping ? "bootstrap_stop_requested" : "bootstrap_loop_end", result);
+    log_stage("bootstrap_cleanup_begin", 0);
+#endif
     cleanup_result = cleanup();
+#ifdef RA_CLIENT_HTTPS
+    log_stage("bootstrap_cleanup_end", cleanup_result);
+#endif
     memory_result = record("post cleanup memory", snapshot("after_cleanup", second, NULL));
     if (!result && memory_result < 0) result = memory_result;
     ra_probe_log_printf(&logger, "client_bootstrap_finished result=%d result_hex=0x%08X cleanup_result=%d log_error=0x%08X frame_binding=UNPROVEN\n",
         result, (unsigned)result, cleanup_result, (unsigned)logger.error);
+#ifdef RA_CLIENT_HTTPS
+    log_stage("bootstrap_log_close", cleanup_result < 0 ? cleanup_result : result);
+#endif
     {
         int close_result = sceIoClose(log_fd);
         if (close_result >= 0) log_fd = -1;
@@ -462,14 +532,24 @@ int module_stop(SceSize args, void* argp)
     SceUInt timeout = 5000000;
     int rc;
     (void)args; (void)argp;
+#ifdef RA_CLIENT_HTTPS
+    exit_notice("kernel_module_stop_enter", 0);
+#endif
     stopping = 1; request_stop();
     if (thread_id >= 0) {
         rc = sceKernelWaitThreadEnd(thread_id, &timeout);
+#ifdef RA_CLIENT_HTTPS
+        exit_notice("kernel_module_stop_wait", rc);
+#endif
         if (rc < 0) return rc;
     }
     /* The observer closed its log; retries must not use the stale writer. */
     logger.write = NULL;
-    rc = cleanup(); if (rc < 0) return rc;
+    rc = cleanup();
+#ifdef RA_CLIENT_HTTPS
+    exit_notice("kernel_module_stop_cleanup", rc);
+#endif
+    if (rc < 0) return rc;
     if (log_fd >= 0) {
         rc = sceIoClose(log_fd); if (rc < 0) return rc;
         log_fd = -1;
@@ -479,3 +559,15 @@ int module_stop(SceSize args, void* argp)
     if (rc >= 0) thread_id = -1;
     return rc;
 }
+#ifdef RA_CLIENT_HTTPS
+/* Kernel reboot-phase ABI is NOT the user SceKernelThreadEntry ABI.
+ * Phase 3 precedes SuspendAllUserThreads. Do not perform filesystem I/O
+ * in phase 1 or reboot-before: a suspended user might own a filesystem lock.
+ * No join, hook restoration, resource release or ModuleMgr call here. */
+int module_reboot_phase(int phase, void* arg, int arg3, int arg4)
+{
+    (void)arg; (void)arg3; (void)arg4;
+    if (phase == 3) exit_notice("kernel_reboot_phase3", 0);
+    return 0;
+}
+#endif

@@ -41,7 +41,11 @@ $(OBJS): Makefile ../../../../ingame/client_shared.h
 main.o: ../../../../ingame/client_mode.h
 main.o: reconnect.h ../../../../ingame/reconnect_policy.h
 main.o: ../../../../ingame/session_mailbox.h
+main.o ra_client_session.o: ../../../../../online/include/ra_client_session.h
 main.o: log_sync.h
+main.o: socket_io.h
+main.o: dns_job.h
+main.o: ../../../../ingame/log_lifecycle.h
 main.o: online_ui.h ../../../../../online/include/ra_ui.h
 main.o: ../../../../ingame/ui_pause.h ../../../../ingame/ui_display.h
 ra_ui.o ra_ui_draw.o ra_client_session.o: ../../../../../online/include/ra_ui.h

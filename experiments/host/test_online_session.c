@@ -269,6 +269,65 @@ static void recover_startup(void)
     assert(ra_session_close(s));
     puts("PASS startup recovery: failed login and set load retry in same session, no dangling callback/pending request");
 }
+/* Reproduce a softcore load stalled after receiving the set: startsession
+ * exceeds its deadline, then a fresh load succeeds in the same client. */
+static void trace_load_timeout(void)
+{
+    ra_session_config config={NULL,now,read_memory,NULL,NULL};
+    ra_client_session* s=ra_session_create(&config);
+    ra_session_stats stats;
+    ra_session_request req;
+    ra_request_trace event;
+    unsigned stage=0, ticket, count=0;
+    assert(s && ra_session_enable_online_softcore(s));
+    /* Exercise timestamp wrapping without overflowing the 64-bit clock. */
+    clock_ms=UINT32_MAX-100u;
+    assert(ra_session_login_token(s,"fixture","synthetic-test-only"));
+    reply(s,"r=login2&",200,login);
+    assert(ra_session_load_game(s,"0123456789abcdef0123456789abcdef"));
+    reply(s,"r=achievementsets&",200,game);
+    assert(ra_session_take_request(s,&req) && req.kind==RA_REQUEST_START);
+    ticket=req.ticket;
+    clock_ms=req.deadline_ms+1;
+    /* A late HTTP 200 must remain a retryable timeout, not a successful load. */
+    assert(ra_session_complete(s,ticket,200,"{}",2));
+    tick(s,0);
+    ra_session_get_stats(s,&stats);
+    assert(!stats.game_loaded && !stats.load_pending && stats.last_http_status==RA_SESSION_RETRYABLE);
+    while(ra_session_take_request_trace(s,&event)) {
+        ++count;
+        if(event.ticket!=ticket)continue;
+        assert(event.kind==RA_REQUEST_START && event.stage==++stage);
+        if(event.stage>=RA_REQUEST_RESPONSE) {
+            assert(event.status<0 && event.age_ms>=RA_SESSION_TIMEOUT_MS);
+        }
+    }
+    assert(count<=RA_REQUEST_TRACE_CAPACITY && stage==RA_REQUEST_CALLBACK_END);
+    assert(!stats.request_trace_dropped);
+    /* Retry in the same client after the failed startsession. */
+    assert(ra_session_load_game(s,"0123456789abcdef0123456789abcdef"));
+    reply(s,"r=achievementsets&",200,game);
+    reply(s,"r=startsession&",200,"{\"Success\":true,\"Unlocks\":[],\"HardcoreUnlocks\":[]}");
+    tick(s,0);
+    ra_session_get_stats(s,&stats);assert(stats.game_loaded && !stats.load_pending);
+    /* Pending automatic ping may occupy one slot; repeated idle ticks do not
+     * create unbounded traces, and diagnostics never contain POST pointers. */
+    count=0;while(ra_session_take_request_trace(s,&event))++count;
+    assert(count<=RA_REQUEST_TRACE_CAPACITY);
+    assert(ra_session_close(s));
+    s=ra_session_create(&config);assert(s);
+    for(count=0;count<6;++count) {
+        assert(ra_session_login_token(s,"fixture","synthetic-test-only"));
+        reply(s,"r=login2&",503,"");
+    }
+    ra_session_get_stats(s,&stats);
+    assert(stats.completed==6 && !stats.pending && !stats.auth_pending);
+    assert(stats.request_trace_dropped==30-RA_REQUEST_TRACE_CAPACITY);
+    count=0;while(ra_session_take_request_trace(s,&event))++count;
+    assert(count==RA_REQUEST_TRACE_CAPACITY);
+    assert(ra_session_close(s));
+    puts("PASS request trace: startsession late response, callback order/status, timestamp wrap, successful load retry, bounded overflow without blocked callbacks");
+}
 static void recover_award(void)
 {
     ra_session_config config={NULL,now,read_memory,NULL,NULL};
@@ -326,7 +385,7 @@ int main(void)
     for (i = 0; i < 7; ++i) scenario(i);
     diagnostic_bounds();
     encore_replay();
-    recover_startup();recover_award();full_offline_queue();
+    recover_startup();trace_load_timeout();recover_award();full_offline_queue();
     diagnostic_limits();
     puts("PASS native diagnostics: cached Delta without extra reads, idle preserves history, bounded ring/conditions/refs, warning excluded from earned/awards");
     puts("PASS online softcore: server unlocks, Delta history, idle, award/ack, rejection, retry, spectator, no duplicate award; synthetic server only");

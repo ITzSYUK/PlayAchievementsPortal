@@ -16,6 +16,17 @@ enum { RA_SESSION_COPY_OK, RA_SESSION_COPY_CANCELLED, RA_SESSION_COPY_TRANSPORT,
        RA_SESSION_COPY_BODY_LIMIT, RA_SESSION_COPY_BUFFER_LIMIT, RA_SESSION_COPY_NO_MEMORY,
        RA_SESSION_COPY_INVALID_BODY };
 typedef struct ra_client_session ra_client_session;
+/* Numeric bounded diagnostics: never retain URL, POST, response or credentials.
+ * Collect under the adapter lock; drain outside frame callbacks. */
+#define RA_REQUEST_TRACE_CAPACITY 16u
+enum { RA_REQUEST_LOGIN=1, RA_REQUEST_SET, RA_REQUEST_START, RA_REQUEST_PING, RA_REQUEST_AWARD };
+enum { RA_REQUEST_QUEUED=1, RA_REQUEST_OFFERED, RA_REQUEST_RESPONSE,
+       RA_REQUEST_CALLBACK_BEGIN, RA_REQUEST_CALLBACK_END };
+typedef struct {
+    unsigned ticket, kind, stage, time_ms, age_ms;
+    int status;
+} ra_request_trace;
+int ra_session_take_request_trace(ra_client_session*, ra_request_trace*);
 typedef struct {
     void* context;
     uint64_t (*now_ms)(void*);
@@ -27,6 +38,7 @@ typedef struct {
 } ra_session_config;
 typedef struct {
     unsigned ticket;
+    unsigned kind;
     const char* url;
     const char* post_data;
     size_t post_size;
@@ -37,6 +49,7 @@ typedef struct {
     unsigned award_requests, award_confirmed, server_errors, last_earned_id, last_confirmed_id;
     unsigned event_dropped, warning_events;
     unsigned encore_events;
+    unsigned request_trace_dropped;
     size_t buffer_bytes, peak_buffer_bytes;
     int last_result, last_copy_error, last_http_status;
     int logged_in, game_loaded, spectator, hardcore;

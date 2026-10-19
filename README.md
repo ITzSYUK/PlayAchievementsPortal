@@ -1,6 +1,6 @@
 # PlayAchievementsPortal
 
-**RetroAchievements on a real PSP — experimental online client, version 0.41.**
+**RetroAchievements on a real PSP — experimental online client, version 0.47 (hardware validation pending). Version 0.46 hardware tests exposed a socket compatibility regression and a stalled DNS call; full HOME cleanup remains unconfirmed.**
 
 [English](#english) · [Русский](#русский)
 
@@ -43,7 +43,7 @@ Sleep/resume currently requests a safe client stop; automatic recovery after sle
 
 ### Build and install
 
-1. Build the online package using the commands below. The generated archive is `build/client-https/PSP_RA_HTTPS_v0.41.zip`; build outputs are not committed.
+1. Build the online package using the commands below. The generated archive is `build/client-https/PSP_RA_HTTPS_v0.47.zip`; build outputs are not committed.
 2. On the tested PSP configuration, enable ARK's **Use Extra Memory → +16 MiB** and create a working PSP Wi-Fi profile.
 3. For a fresh installation, copy the archive's `SEPLUGINS/RAClientLite/` directory to `ms0:/SEPLUGINS/RAClientLite/`. Set `profile.txt` to your actual saved Wi-Fi profile number. The packaged value is `1`.
 4. Register **only the bootstrap module**, restricted to the supported game, using the ARK plugin configuration:
@@ -106,10 +106,37 @@ make online-test ingame-test public-check
 
 The PSP build checks module exports, the heap, imports, PRX file size and the **final PRX PT_LOAD memory**, including padding and BSS. Root `make` still builds the inherited offline plugin; use the script above for the online client. Host tests use synthetic server responses and do not award achievements to a real account. PPSSPP is useful for diagnostics but does not replace testing on a PSP.
 
-The client writes `client-bootstrap.log` and `client-user.log` beside the PRX files. Each launch overwrites them. Save both **before launching the game again** when reporting an issue. Include the PSP/CFW, image region/revision, client version and the steps leading to the failure. Do not include `auth.txt`. Logs are bounded to 128 KiB; once full, new lines are discarded without stopping play.
+The client keeps `client-bootstrap.log` and `client-user.log` plus three earlier pairs (`.1`–`.3`), with matching `LOG_SESSION` IDs. Version 0.42 hardware logs confirmed sessions 1–3 and preservation of the legacy 0.41 pair. Save all eight files when reporting an issue; include PSP/CFW, image revision, client version and preceding actions. Never include `auth.txt`. Each log is bounded to 128 KiB, with space reserved for teardown.
+
+Version 0.43 adds native user `module_reboot_before` and kernel `module_reboot_phase(3)` notifications without replacing the game's exit callback. The user notification requests a stop without waiting. Before user threads are suspended, the kernel writes `EXIT_NOTICE` directly to the bootstrap log, independently of the worker, using a separate 1 KiB reserve. `source=kernel_reboot_phase3` proves receipt of a LoadExec teardown notification; it does not prove that HOME was the cause or cleanup completed. `user_flags` bit 1 means user reboot notification, bit 2 means user `module_stop`; `worker_done=1` reports the owner's cleanup acknowledgement. Early `kernel_module_stop_enter/wait/cleanup` notices distinguish that separate path. Filesystem writeback is best effort; storage I/O has no hard deadline.
+
+Version 0.44 addresses the silent-start regression reported with 0.43: the kernel no longer imports `sceIoSync`; session log creation uses the proven 0.42 flags, followed by a separate append open. A failed append open is recorded in the initial log before any user module is loaded. `EXIT_NOTICE` closes its own descriptor; only the existing user worker performs periodic device sync. The exact failing 0.43 operation remains unknown because no logs were created.
+
+Version 0.44 hardware logs now confirm exactly eight files after launch 5: matching bootstrap/user pairs 5/4/3/2, with pair 1 removed. Launch numbering, rotation, startup stages and exit notifications are verified for this prototype. Full HOME cleanup is a separate open task.
+
+Version 0.47 corrects the socket compatibility regression: successful SO_NONBLOCK setup is required; its value/size readback is logged by SOCKET_MODE without rejecting PSP-specific results. Every send/recv retains `MSG_DONTWAIT`, linger is disabled and poll uses zero timeout plus yields of at most 50 ms. DNS runs in one temporary helper with module-owned buffers and an 8 KiB stack. Transport waits up to five seconds (or the remaining request deadline), then requests sceNetResolverStop and allows one second to confirm STOPPED plus completion before deleting the helper. Only after that can the existing retry use new resources. If completion is not confirmed, -35424 stops the client while retaining live resources; the helper is never forcibly killed. The 30-second request deadline and existing retry scheduling remain; retries use a fresh connection only after the old transport releases its resources. No thread is forcibly terminated and live buffers are never reassigned. This is not a hard deadline guarantee for arbitrary PSP/CFW calls: DNS, TLS computation or cleanup can still require hardware diagnosis.
+
+To test 0.47, install both PRX files together, keep your settings and logs, explicitly set `mode.txt` to `spectator` **and `encore.txt` to `0`**, restart the PSP and run the verified image three times. Encore=1 with spectator aborts startup with -35421 before notifications. Keep Wi-Fi on; allow up to three minutes per launch, record whether **ACHIEVEMENTS LOADED** appears and whether the game remains responsive, then exit through HOME. This three-minute observation window is not a client timeout or success guarantee. Save all eight logs after the third run; never include `auth.txt`. Spectator omits softcore `startsession`, so successful spectator runs alone do not establish that the softcore problem is fixed.
+
+`TRANSPORT_STATE` samples the network thread during startup every five seconds. `location=2*N+1` means a call was entered, `2*N` means it returned; N: 1 resolver create, 2 DNS lookup, 3 socket create, 4 socket setup, 5 connect, 6 connect error query, 7 TLS, 8 send, 9 recv, 10 poll/yield, 11 socket close, 12 resolver delete, 13 resolver Stop. This is the last recorded call, not a complete TLS stack trace. `actions` counts entries; `thread_query`, `status`, `wait_type`, `exit_status` distinguish a query failure or stopped/waiting/running thread. Fields are sampled independently. Frozen counters and an entered call help locate a stall; they do not establish its cause. SOCKET_MODE reports the setter/query results, raw value and returned size. DNS_STATE reports helper UID, completion and cancellation flags; DNS_RESULT reports elapsed time, resolver result and Stop attempts. Result -35425 means no result was collected. The Stop call itself has no proven hard deadline on the tested CFW; retained resources are not a completed cleanup.
+
+`REQUEST_TRACE` uses numeric `kind`: 1 login, 2 achievement sets, 3 start session, 4 ping, 5 award; `stage`: 1 queued, 2 offered to transport, 3 response delivered to adapter (or queued request expired), 4 callback begin, 5 callback end. `age_ms` measures time since enqueue; `time_ms32` wraps after about 49 days. `HTTP_TRANSFER` reports actual transport duration including I/O release. `STARTUP_WAIT` every five seconds reports pending operations, copy errors and mailbox state (0 idle, 1 offered, 2 active, 3 response waiting). The bounded 16-event buffer overwrites oldest events with a `trace_dropped` counter; trace events contain only numbers and are written to disk by the worker, outside game callbacks. Buffered markers may be lost on exit or if the owner stalls; absence of callback-end alone does not prove its cause. REQUEST_TRACE is drained only during startup, with a final drain before frame evaluation begins, to avoid worker contention on the game callback semaphore. Request timeouts, TLS verification and shutdown waits are unchanged.
+
+Interpret each session's matching log pair separately:
+
+| Evidence | Conclusion |
+|---|---|
+| `EXIT_NOTICE source=kernel_reboot_phase3` | System process-exit notification received; HOME as the cause and completed cleanup are not established |
+| `worker_done=1` | User owner acknowledged its cleanup; bootstrap cleanup and final process teardown are not established |
+| `LIFECYCLE stage=user_cleanup_end result=0` / `stage=bootstrap_cleanup_end result=0` | That component's cleanup code reached its successful end; final log close and thread termination still follow |
+| Cleanup marker with a negative result | Cleanup attempt ended with an error; resources may remain |
+| No process-exit notice and no successful cleanup evidence | End cause unknown; a truncated log alone does not prove a crash |
+
+Keep exit notification and cleanup status as separate observations: a session can have a confirmed exit notice and unconfirmed cleanup. `client_finished` or `client_bootstrap_finished` alone is insufficient; inspect `cleanup_result` and subsequent stages. Full cleanup during HOME remains a separate lifecycle task. First measure cleanup duration and identify surviving threads; do not add forced worker waits to the exit notification. The earlier launch-screen freeze remains unexplained; preserve the history if it recurs.
 
 Source map: `online/` contains the portable adapters, `experiments/psp/ingame/https/` the PSP modules, `experiments/ingame/` and `experiments/host/` the host tests, and `plugin/` the inherited offline implementation.
 
+- [0.42: bounded launch history and lifecycle stages](docs/ONLINE_CLIENT_042.md)
 - [0.41: startup menu fix](docs/ONLINE_CLIENT_041.md)
 - [0.40: Wi-Fi/RA recovery and status cards](docs/ONLINE_CLIENT_040.md)
 - [0.37: Encore behavior](docs/ONLINE_CLIENT_037.md)
@@ -163,7 +190,7 @@ PlayAchievementsPortal — экспериментальный онлайн-кл�
 
 ### Сборка и установка
 
-1. Собери онлайн-клиент командами ниже. Архив появится в `build/client-https/PSP_RA_HTTPS_v0.41.zip`; готовые сборки в Git не добавляются.
+1. Собери онлайн-клиент командами ниже. Архив появится в `build/client-https/PSP_RA_HTTPS_v0.47.zip`; готовые сборки в Git не добавляются. 0.47 ещё не проверена на PSP. На PSP в 0.46 выявлены несовместимость проверки сокета и задержка DNS; полная очистка при HOME не подтверждена.
 2. На проверенной конфигурации PSP включи в ARK **Use Extra Memory → +16 MiB** и создай рабочий профиль Wi-Fi.
 3. При первой установке скопируй папку `SEPLUGINS/RAClientLite/` из архива в `ms0:/SEPLUGINS/RAClientLite/`. В `profile.txt` укажи номер своего сохранённого профиля Wi-Fi. Значение в архиве — `1`.
 4. В настройках плагинов ARK добавь запись только для bootstrap и указанной игры:
@@ -226,10 +253,37 @@ make online-test ingame-test public-check
 
 Проверяются exports, heap, импорты, размер PRX и память **конечного сегмента PT_LOAD**, включая промежутки и BSS. Обычный `make` в корне собирает исходный офлайн-плагин; для онлайн-клиента нужен указанный скрипт. Тесты на компьютере используют синтетические серверные ответы и ничего не начисляют реальному аккаунту. PPSSPP помогает диагностике, но не заменяет настоящую PSP.
 
-Логи `client-bootstrap.log` и `client-user.log` находятся рядом с PRX и перезаписываются при каждом запуске. При проблеме сохрани оба **до следующего запуска**, укажи PSP/CFW, регион и ревизию игры, версию клиента и действия перед сбоем. Не прикладывай `auth.txt`. Каждый лог ограничен 128 КиБ; после заполнения новые строки отбрасываются, игра продолжается.
+Рядом с PRX сохраняются `client-bootstrap.log`, `client-user.log` и три предыдущие пары (`.1`–`.3`) с общим номером `LOG_SESSION`. На PSP в 0.42 подтверждены сессии 1–3 и сохранение старой пары 0.41. При проблеме сохрани все восемь файлов, укажи PSP/CFW, ревизию образа, версию клиента и предшествующие действия. Не прикладывай `auth.txt`. Каждый лог ограничен 128 КиБ с резервом для остановки.
+
+В 0.43 добавлены штатные user `module_reboot_before` и kernel `module_reboot_phase(3)`, без замены exit-callback игры. User-обработчик запрашивает остановку без ожидания. До приостановки user-потоков kernel пишет `EXIT_NOTICE` непосредственно в bootstrap-лог независимо от worker, с отдельным резервом 1 КиБ. `source=kernel_reboot_phase3` подтверждает получение уведомления LoadExec о завершении процесса; это не доказательство выхода именно через HOME или полной очистки. В `user_flags` бит 1 означает user reboot-уведомление, бит 2 — user `module_stop`; `worker_done=1` означает подтверждение очистки владельцем. Ранние `kernel_module_stop_enter/wait/cleanup` различают отдельный путь остановки модуля. Запись и синхронизация файлов выполняются по возможности, жёсткого тайм-аута I/O нет.
+
+В 0.44 устранены два отличия раннего старта от рабочей 0.42: импорт `sceIoSync` из kernel убран, лог создаётся прежними флагами и затем отдельно открывается для дописывания. Ошибка второго открытия записывается в исходный лог до загрузки user-модуля. `EXIT_NOTICE` закрывает свой дескриптор; периодическую синхронизацию устройства по-прежнему выполняет существующий user-worker. Точная отказавшая операция 0.43 неизвестна: новые логи не появились.
+
+Логи 0.44 на PSP подтвердили после пятого запуска ровно восемь файлов: совпадающие пары bootstrap/user с ID 5/4/3/2, пара 1 удалена. Нумерация, ротация, этапы старта и уведомления о выходе проверены для прототипа. Полная очистка при HOME — отдельная незакрытая задача.
+
+0.47 исправляет несовместимость проверки сокета: успешный SO_NONBLOCK обязателен, но прочитанные значение и размер записываются в SOCKET_MODE без отказа из-за отличий PSP. Каждый send/recv сохраняет `MSG_DONTWAIT`, linger выключен, poll вызывается с нулевым ожиданием и паузами до 50 мс. DNS выполняется в одном временном потоке с буферами внутри модуля и стеком 8 КиБ. Транспорт ждёт до пяти секунд (либо оставшегося срока запроса), затем запрашивает sceNetResolverStop и отводит секунду на подтверждение STOPPED и завершения перед удалением потока. Только после этого существующий повтор может использовать новые ресурсы. Если завершение не подтверждено, -35424 останавливает клиент с удержанием живых ресурсов; поток принудительно не уничтожается. Срок запроса 30 секунд и существующий повтор сохранены; новый запрос использует новое соединение только после освобождения ресурсов старого. Принудительного завершения потока и передачи занятых буферов нет. Это не гарантия жёсткого срока произвольных PSP/CFW-вызовов: DNS, вычисления TLS и очистка ещё могут потребовать диагностики на железе.
+
+Для проверки 0.47 замени оба PRX вместе, сохрани настройки и логи, явно запиши `spectator` в `mode.txt` **и `0` в `encore.txt`**, перезагрузи PSP и выполни три запуска проверенного образа. Encore=1 вместе со spectator останавливает запуск с -35421 до появления уведомлений. Wi-Fi не переключай; в каждом запуске наблюдай до трёх минут, отметь появление **ACHIEVEMENTS LOADED** и отзывчивость игры, затем выйди через HOME. Три минуты — окно наблюдения, а не тайм-аут клиента или гарантия успеха. После третьего запуска сохрани восемь логов, без `auth.txt`. В spectator нет softcore-запроса `startsession`: успех в spectator сам по себе не доказывает исправление проблемы softcore.
+
+`TRANSPORT_STATE` раз в пять секунд при запуске показывает сетевой поток. `location=2*N+1` — вход в вызов, `2*N` — возврат; N: 1 — создание resolver, 2 — DNS, 3 — создание сокета, 4 — настройка сокета, 5 — connect, 6 — проверка ошибки connect, 7 — TLS, 8 — send, 9 — recv, 10 — poll/пауза, 11 — close, 12 — удаление resolver, 13 — Stop resolver. Это последний отмеченный вызов, а не полный стек TLS. `actions` — счётчик входов; `thread_query`, `status`, `wait_type`, `exit_status` помогают отличить ошибку опроса, завершённый, ожидающий и выполняющийся поток. Поля считываются по отдельности. Неизменный счётчик и отметка входа локализуют остановку, но не доказывают причину. SOCKET_MODE показывает результаты установки/чтения, значение и размер. DNS_STATE показывает UID потока, флаги завершения и отмены; DNS_RESULT — длительность, результат resolver и попытки Stop. -35425 означает, что результат не получен. Жёсткий срок самого Stop на CFW владельца не доказан; удержание ресурсов не считается завершённой очисткой.
+
+В `REQUEST_TRACE` поле `kind`: 1 — вход, 2 — набор, 3 — старт сессии, 4 — ping, 5 — зачёт; `stage`: 1 — очередь, 2 — передача транспорту, 3 — ответ передан адаптеру (либо запрос просрочен в очереди), 4 — начало callback, 5 — конец callback. `age_ms` — время от постановки в очередь; `time_ms32` оборачивается примерно через 49 суток. `HTTP_TRANSFER` показывает длительность транспорта, включая освобождение I/O. `STARTUP_WAIT` раз в пять секунд показывает pending, ошибки копирования и mailbox: 0 — свободен, 1 — предложен запрос, 2 — транспорт работает, 3 — ответ ожидает передачи. Буфер на 16 числовых событий вытесняет старые со счётчиком `trace_dropped`; в файл пишет worker вне игрового callback. При выходе или остановке владельца буферизованные маркеры могут не сохраниться; отсутствие конца callback само по себе не устанавливает причину. REQUEST_TRACE выгружается только при запуске, с последней выгрузкой до включения оценки кадров, чтобы worker не конкурировал за семафор игрового callback. Тайм-ауты, TLS-проверка и ожидания остановки не изменены.
+
+Разбирай каждую пару с совпадающим номером сессии отдельно:
+
+| Свидетельство | Вывод |
+|---|---|
+| `EXIT_NOTICE source=kernel_reboot_phase3` | Получено системное уведомление о завершении процесса; причина HOME и завершение очистки не установлены |
+| `worker_done=1` | Владелец user подтвердил свою очистку; очистка bootstrap и окончательное завершение процесса не установлены |
+| `LIFECYCLE stage=user_cleanup_end result=0` / `stage=bootstrap_cleanup_end result=0` | Код очистки соответствующего компонента дошёл до успешного конца; закрытие лога и завершение потока идут далее |
+| Маркер очистки с отрицательным результатом | Попытка очистки закончилась ошибкой; ресурсы могут остаться |
+| Нет уведомления о завершении процесса и свидетельств успешной очистки | Причина окончания неизвестна; обрыв лога сам по себе не доказывает сбой |
+
+Уведомление о выходе и состояние очистки — отдельные признаки: уведомление может быть подтверждено при неподтверждённой очистке. Одной строки `client_finished` или `client_bootstrap_finished` недостаточно: проверяй `cleanup_result` и последующие этапы. Полная очистка при HOME остаётся отдельной задачей жизненного цикла. Сначала нужны замеры времени очистки и проверка оставшихся потоков; принудительное ожидание worker в уведомлении о выходе не добавляется. Старое зависание на заставке остаётся необъяснённым; при повторении сохрани историю.
 
 Структура: `online/` — переносимые адаптеры; `experiments/psp/ingame/https/` — модули PSP; `experiments/ingame/` и `experiments/host/` — проверки на компьютере; `plugin/` — исходная офлайн-реализация.
 
+- [0.42: история запусков и этапы жизненного цикла](docs/ONLINE_CLIENT_042.md)
 - [0.41: исправление раннего меню](docs/ONLINE_CLIENT_041.md)
 - [0.40: переподключение и сетевые уведомления](docs/ONLINE_CLIENT_040.md)
 - [0.37: Encore](docs/ONLINE_CLIENT_037.md)
