@@ -379,6 +379,49 @@ static void full_offline_queue(void)
     assert(ra_session_close(s));
     puts("PASS full offline queue: concurrent ping and two awards, saturated slot retries without rejection or lost award");
 }
+static void hash_selects_set(void)
+{
+    static const char* hashes[] = {
+        "0123456789abcdef0123456789abcdef", "abcdef0123456789abcdef0123456789",
+        "00000000000000000000000000000000"
+    };
+    const ra_session_config config = {NULL, now, read_memory, NULL, NULL};
+    ra_client_session* s = ra_session_create(&config);
+    ra_session_request request;
+    ra_session_stats stats;
+    char second[sizeof(game)];
+    char* field;
+    unsigned i;
+    assert(s && ra_session_login_token(s, "fixture", "synthetic-test-only"));
+    reply(s, "r=login2&", 200, login);
+    memcpy(second, game, sizeof(game));
+    field = second;
+    while ((field = strstr(field, "\"GameId\":1")) != NULL) { field[9] = '2'; ++field; }
+    for (i = 0; i < 3; ++i) {
+        const char* body = i == 0 ? game : i == 1 ? second :
+            "{\"Success\":false,\"Error\":\"Unknown fixture hash\"}";
+        const char* parameter;
+        assert(ra_session_load_game(s, hashes[i]));
+        assert(ra_session_take_request(s, &request));
+        assert(request.kind == RA_REQUEST_SET && !strncmp(request.post_data, "r=achievementsets&", 18));
+        assert(!strcmp(request.url, "https://retroachievements.org/dorequest.php"));
+        parameter = strstr(request.post_data, "&m=");
+        assert(parameter && !strcmp(parameter + 3, hashes[i]));
+        assert(!strstr(request.post_data, "&g=")); /* No hand-picked/cached game ID. */
+        assert(ra_session_complete(s, request.ticket, 200, body, strlen(body)));
+        tick(s, 0);
+        ra_session_get_stats(s, &stats);
+        assert(!stats.pending && stats.spectator && !stats.hardcore && !stats.earned_events);
+        if (i < 2) {
+            assert(stats.last_result == RC_OK && stats.game_loaded && stats.game_id == i + 1);
+            assert(stats.achievements == 2); /* Server warning is not an achievement. */
+        } else {
+            assert(stats.last_result != RC_OK && !stats.game_loaded && !stats.game_id && !stats.achievements);
+        }
+    }
+    assert(ra_session_close(s));
+    puts("PASS hash selection: distinct hashes request distinct server sets over HTTPS; unknown hash cannot reuse the preceding catalog; spectator only");
+}
 int main(void)
 {
     unsigned i;
@@ -387,6 +430,7 @@ int main(void)
     encore_replay();
     recover_startup();trace_load_timeout();recover_award();full_offline_queue();
     diagnostic_limits();
+    hash_selects_set();
     puts("PASS native diagnostics: cached Delta without extra reads, idle preserves history, bounded ring/conditions/refs, warning excluded from earned/awards");
     puts("PASS online softcore: server unlocks, Delta history, idle, award/ack, rejection, retry, spectator, no duplicate award; synthetic server only");
     return 0;

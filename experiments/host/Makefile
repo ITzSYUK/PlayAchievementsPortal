@@ -22,6 +22,16 @@ $(BUILD)/test_session_mailbox: test_session_mailbox.c ../ingame/session_mailbox.
 all: $(BUILD)/test_online_session
 $(BUILD)/test_online_session: test_online_session.c ../../online/src/ra_client_session.c ../../online/include/ra_client_session.h $(BUILD)/librcheevos.a
 	$(CC) $(CPPFLAGS) $(CFLAGS) -DRA_SESSION_ONLINE test_online_session.c ../../online/src/ra_client_session.c $(BUILD)/librcheevos.a $(LDFLAGS) $(LDLIBS) -o $@
+all: $(BUILD)/test_rcheevos_regressions $(BUILD)/client_memory_bench
+$(BUILD)/test_rcheevos_regressions: test_rcheevos_regressions.c $(BUILD)/librcheevos.a
+	$(CC) $(CPPFLAGS) $(CFLAGS) $< $(BUILD)/librcheevos.a $(LDFLAGS) $(LDLIBS) -o $@
+
+$(BUILD)/client_memory_bench: client_memory_bench.c ../../online/src/ra_client_session.c ../../online/include/ra_client_session.h $(BUILD)/librcheevos.a
+	$(CC) $(CPPFLAGS) $(CFLAGS) -fno-builtin-malloc -fno-builtin-calloc -fno-builtin-realloc -fno-builtin-free client_memory_bench.c ../../online/src/ra_client_session.c $(BUILD)/librcheevos.a $(LDFLAGS) $(LDLIBS) -Wl,--wrap=malloc,--wrap=calloc,--wrap=realloc,--wrap=free,--wrap=strdup -o $@
+
+.PHONY: memory-bench
+memory-bench: $(BUILD)/client_memory_bench
+	$(BUILD)/client_memory_bench $(if $(SETS),--sets "$(SETS)")
 all: $(BUILD)/test_state_test $(BUILD)/test_target_session $(BUILD)/offline_probe $(BUILD)/hash_probe $(BUILD)/test_probe_log $(BUILD)/test_client_session $(BUILD)/test_client_session_noframes $(BUILD)/test_auth_file $(BUILD)/test_large_session $(BUILD)/test_game_session
 
 $(BUILD):
@@ -83,6 +93,8 @@ $(BUILD)/test_target_session: test_game_session.c ../../online/src/ra_client_ses
 	$(CC) $(CPPFLAGS) -I$(RC_ROOT)/src $(CFLAGS) -DRA_SESSION_NO_FRAMES -DRA_SESSION_STATE_TEST test_game_session.c ../../online/src/ra_client_session.c ../../online/src/ra_state_test.c ../../online/src/ra_game_memory.c ../../online/src/ra_psp_memory.c $(BUILD)/librcheevos.a $(LDFLAGS) $(LDLIBS) -o $@
 
 test: all
+	$(BUILD)/test_rcheevos_regressions
+	$(BUILD)/client_memory_bench
 	$(BUILD)/test_session_mailbox
 	$(BUILD)/test_online_session
 	$(BUILD)/test_state_test
