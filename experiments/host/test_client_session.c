@@ -197,10 +197,18 @@ int main(void)
     assert(ra_session_login_token(session, "fixture", "synthetic-test-only"));
     assert(pthread_create(&transport, NULL, deliver_session, session) == 0);
     {
-        unsigned spin; int loading = 0;
+        unsigned spin, trace_received=0; int loading = 0;
         const struct timespec delay = { 0, 1000000 };
         for (spin = 0; spin < 5000; ++spin) {
+            ra_request_trace trace;
             ra_session_tick(session, 0, 1);
+            /* Drain concurrently with transport completion under the real
+             * adapter mutex; no borrowed request pointers escape. */
+            while(ra_session_take_request_trace(session,&trace)) {
+                assert(trace.ticket && trace.kind>=RA_REQUEST_LOGIN && trace.kind<=RA_REQUEST_AWARD);
+                assert(trace.stage>=RA_REQUEST_QUEUED && trace.stage<=RA_REQUEST_CALLBACK_END);
+                ++trace_received;
+            }
             ra_session_get_stats(session, &stats);
             if (stats.logged_in && !loading) {
                 assert(ra_session_load_game(session, "0123456789abcdef0123456789abcdef")); loading = 1;
@@ -208,6 +216,7 @@ int main(void)
             if (stats.game_loaded) break;
             nanosleep(&delay, NULL);
         }
+        assert(trace_received>0);
         assert(spin < 5000 && stats.game_loaded && stats.pending == 0 && stats.earned_events == 0);
     }
     assert(pthread_join(transport, NULL) == 0);

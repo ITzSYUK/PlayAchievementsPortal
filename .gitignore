@@ -63,6 +63,7 @@ tools/ra_import/badge_cache/
 *.pem
 *.key
 auth.txt
+pending-*.raq
 
 # Local audit downloads and experiment output
 .work/

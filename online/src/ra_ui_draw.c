@@ -113,6 +113,30 @@ static void number(const ra_ui_surface* s,int x,int y,unsigned value,unsigned co
 }
 static unsigned state_color(unsigned state)
 { return state==RA_UI_CONFIRMED?0x64df98:state==RA_UI_REJECTED?0xff8585:0xd2c68a; }
+static void badge(const ra_ui_surface* s,int x,int y,unsigned size,const ra_ui_row* row,unsigned state)
+{
+    unsigned xx,yy;
+    rect(s,x-1,y-1,(int)size+2,(int)size+2,0x506070);
+    if(!row || !row->badge) {
+        rect(s,x,y,(int)size,(int)size,0x202c38);
+        rect(s,x+(int)size/4,y+(int)size/4,(int)size/2,(int)size/3,0x9faab6);
+        rect(s,x+(int)size/2-1,y+(int)size/2,2,(int)size/4,0x9faab6);
+        return;
+    }
+    for(yy=0;yy<size;++yy)for(xx=0;xx<size;++xx) {
+        unsigned p=row->badge[(yy*32/size)*32+xx*32/size];
+        unsigned r=(p&31)*255/31,g=((p>>5)&63)*255/63,b=(p>>11)*255/31;
+        if(state==RA_UI_LOCKED || state==RA_UI_UNSUPPORTED)r=g=b=(r*77+g*150+b*29)>>8;
+        rect(s,x+(int)xx,y+(int)yy,1,1,(r<<16)|(g<<8)|b);
+    }
+}
+static void code(const ra_ui_surface* s,int x,int y,int error)
+{
+    static const char digits[]="0123456789ABCDEF";
+    char value[11]="0X00000000";unsigned i;
+    for(i=0;i<8;++i)value[9-i]=digits[((uint32_t)error>>(i*4))&15];
+    text(s,x,y,value,10,0xaaaaaa);
+}
 void ra_ui_draw(const ra_ui* ui,const ra_ui_surface* s,int menu,unsigned filter,
                 unsigned selected,const ra_ui_notice* notice)
 {
@@ -128,6 +152,16 @@ void ra_ui_draw(const ra_ui* ui,const ra_ui_surface* s,int menu,unsigned filter,
         text(s,265,29,filter==0?"ALL":filter==1?"UNCONFIRMED":"CONFIRMED",30,0xd2c68a);
         text(s,18,43,"MENU PAUSE - NETWORK ACTIVE",72,0xffb878);
         if(ui->spectator)text(s,18,55,"ACCOUNT UNLOCKS NOT LOADED IN SPECTATOR",72,0xffb878);
+        if(ui->details) {
+            unsigned length=(unsigned)strlen(ui->warning_description);
+            text(s,18,72,"SERVICE WARNING / CONNECTION",70,0xffb878);
+            text(s,18,89,ui->warning_title[0]?ui->warning_title:"NO SERVICE WARNING",73,0xffffff);
+            for(i=0;i<4 && i*73<length;++i)text(s,18,104+(int)i*12,ui->warning_description+i*73,73,0xdddddd);
+            text(s,18,170,ra_ui_reason(ui->reason),73,0xffb878);
+            if(ui->error_code)code(s,18,185,ui->error_code);
+            text(s,18,247,"SQUARE BACK  CIRCLE CLOSE",74,0xaaaaaa);
+            return;
+        }
         count=ra_ui_count(ui,filter);if(selected>=count)selected=count?count-1:0;
         first=(selected/7)*7;
         for(i=0;i<7 && first+i<count;++i) {
@@ -135,7 +169,8 @@ void ra_ui_draw(const ra_ui* ui,const ra_ui_surface* s,int menu,unsigned filter,
             index=ra_ui_index(ui,filter,first+i);if(index<0)break;
             row=&ui->rows[index];state=ra_ui_state(ui,(unsigned)index);
             if(first+i==selected)rect(s,14,69+(int)i*17,452,16,0x26384c);
-            text(s,20,72+(int)i*17,row->title,49,0xffffff);
+            badge(s,19,69+(int)i*17,14,row,state);
+            text(s,39,72+(int)i*17,row->title,46,0xffffff);
             text(s,322,72+(int)i*17,state==RA_UI_CONFIRMED?"CONFIRMED":
                 state==RA_UI_PENDING?"PENDING":state==RA_UI_LOCAL?"LOCAL":
                 state==RA_UI_REJECTED?"ERROR":state==RA_UI_UNSUPPORTED?"UNSUPPORTED":"LOCKED",22,state_color(state));
@@ -147,18 +182,20 @@ void ra_ui_draw(const ra_ui* ui,const ra_ui_surface* s,int menu,unsigned filter,
             text(s,360,194,"PTS",3,0xaaaaaa);number(s,390,194,row->points,0xffffff);
             for(i=0;i<3 && i*73<length;++i)text(s,18,207+(int)i*10,row->description+i*73,73,0xdddddd);
         } else text(s,18,100,ui->count?"NO ACHIEVEMENTS IN THIS FILTER":"WAITING FOR OFFICIAL SET",60,0xdddddd);
-        text(s,18,247,"TRI FILTER  UP/DN MOVE  LEFT/RIGHT PAGE  CIRCLE CLOSE",74,0xaaaaaa);
+        text(s,18,247,"TRI FILTER  UP/DN MOVE  L/R PAGE  SQUARE INFO  O CLOSE",74,0xaaaaaa);
     } else if(notice) {
+        const int y=(int)RA_NOTICE_Y;
         if(notice->type>=7) {
             const char* heading=notice->type==7?"CONNECTING TO WI-FI":notice->type==8?"CONNECTION FAILED":
                 notice->type==9?"WI-FI CONNECTED":notice->type==10?"RA LOGIN RETRY":
                 notice->type==11?"RA SET LOAD RETRY":notice->type==13?"RA SERVER REACHABLE":
-                notice->type==14?"ACHIEVEMENTS LOADING":"RA CONNECTION FAILED";
-            rect(s,112,205,360,59,0x0c1017);rect(s,112,205,3,59,0xffb878);
-            text(s,124,213,heading,55,0xffb878);
-            text(s,124,227,notice->type==14?"PLEASE WAIT FOR OFFICIAL SET":notice->type==13?"REQUESTS RESUMED":notice->type==9?"LINK READY - CONTACTING RA":notice->type==12?
+                notice->type==14?"ACHIEVEMENTS LOADING":notice->type==15?"PSP RESUMING":notice->type==16?"PSP RESUMED":"RA CONNECTION FAILED";
+            rect(s,112,y,360,59,0x0c1017);rect(s,112,y,3,59,0xffb878);
+            text(s,124,y+8,heading,55,0xffb878);
+            text(s,124,y+22,ui->reason?ra_ui_reason(ui->reason):notice->type==14?"PLEASE WAIT FOR OFFICIAL SET":notice->type==13?"REQUESTS RESUMED":notice->type==9?"LINK READY - CONTACTING RA":notice->type==12?
                 "CHECK LOG AND CONFIGURATION":"RETRYING AUTOMATICALLY",55,0xffffff);
-            if(notice->id){text(s,124,244,"NEXT ATTEMPT IN",20,0xaaaaaa);number(s,220,244,notice->id,0xffffff);text(s,244,244,"SEC",3,0xaaaaaa);}
+            if(notice->id){text(s,124,y+39,"RETRY IN",9,0xaaaaaa);number(s,184,y+39,notice->id,0xffffff);text(s,211,y+39,"SEC",3,0xaaaaaa);}
+            if(ui->error_code)code(s,390,y+39,ui->error_code);
             return;
         }
         const char* title=notice->type==5?"OFFICIAL SET READY":"CLIENT WARNING";
@@ -167,14 +204,25 @@ void ra_ui_draw(const ra_ui* ui,const ra_ui_surface* s,int menu,unsigned filter,
         if(notice->type==1)state=ui->spectator?RA_UI_LOCAL:RA_UI_PENDING;
         else if(notice->type==2)state=RA_UI_CONFIRMED;
         else if(notice->type==3)state=RA_UI_REJECTED;
-        rect(s,112,205,360,59,0x0c1017);rect(s,112,205,3,59,state_color(state));
-        text(s,124,213,notice->type==5?"ACHIEVEMENTS LOADED":
+        rect(s,112,y,360,59,0x0c1017);rect(s,112,y,3,59,state_color(state));
+        if(notice->type==4) {
+            text(s,124,y+6,"CLIENT WARNING",55,0xffb878);
+            text(s,124,y+18,ui->warning_title[0]?ui->warning_title:"SERVICE WARNING",55,0xffffff);
+            text(s,124,y+30,ui->warning_description,55,0xdddddd);
+            if(strlen(ui->warning_description)>55)text(s,124,y+42,ui->warning_description+55,55,0xdddddd);
+            return;
+        }
+        if(i<ui->count)badge(s,123,y+18,32,&ui->rows[i],state);
+        {
+        int tx=i<ui->count?164:124;unsigned limit=i<ui->count?49:55;
+        text(s,tx,y+5,notice->type==5?"ACHIEVEMENTS LOADED":
              notice->type==6?"ENCORE - LOCAL REPLAY":notice->type==4?"CLIENT WARNING":ra_ui_label(state),55,state_color(state));
-        text(s,124,227,title,55,0xffffff);
-        text(s,124,244,notice->type==2?"RETROACHIEVEMENTS ACCEPTED":notice->type==1 && !ui->spectator?
-             "WAITING FOR SERVER RESPONSE":"L+R+SELECT: ACHIEVEMENTS",44,0xaaaaaa);
+        text(s,tx,y+22,title,limit,0xffffff);
+        text(s,tx,y+39,notice->type==2?"RETROACHIEVEMENTS ACCEPTED":notice->type==1 && !ui->spectator?
+             "WAITING FOR SERVER RESPONSE":"L+R+SELECT: ACHIEVEMENTS",36,0xaaaaaa);
+        }
         if(i<ui->count) {
-            text(s,398,244,"PTS",3,0xaaaaaa);number(s,428,244,points,0xffffff);
+            text(s,418,y+49,"PTS",3,0xaaaaaa);number(s,442,y+49,points,0xffffff);
         }
     }
 }

@@ -13,6 +13,8 @@ typedef struct { int64_t st_size; } SceIoStat;
 #define PSP_O_WRONLY 1
 #define PSP_O_CREAT 2
 #define PSP_O_TRUNC 4
+#define PSP_O_RDONLY 8
+#define PSP_O_APPEND 16
 #define SCE_KERNEL_ERROR_PARTITION_MISMATCH UINT32_C(0x80020132)
 #define SCE_KERNEL_ERROR_NOT_STARTED UINT32_C(0x80020134)
 typedef struct { unsigned size, startaddr, memsize, attr; } PspSysmemPartitionInfo;
@@ -57,7 +59,12 @@ typedef struct { SceSize size; int status, exitStatus; } SceKernelThreadInfo;
 #define PSP_THREAD_KILLED 32
 int sceKernelReferThreadStatus(int, SceKernelThreadInfo*);
 int sceIoOpen(const char*, int, int);
+int sceIoRead(int, void*, unsigned);
+int sceIoRemove(const char*);
+int sceIoRename(const char*, const char*);
+unsigned sceKernelGetSystemTimeLow(void);
 int sceIoWrite(int, const void*, unsigned);
 int sceIoClose(int);
+int sceIoSync(const char*, unsigned);
 int sceIoGetstat(const char*, SceIoStat*);
 #endif

@@ -43,7 +43,8 @@ def write_pair(root, label, key, cert):
 
 
 def run(binary, pair, ca_file, *, hostname='localhost', response=None, silent=False,
-        entropy_failure=False, timeout=3000, slow=False, utc_epoch=None, clean_close=False):
+        entropy_failure=False, timeout=3000, slow=False, utc_epoch=None, clean_close=False,
+        retry=False):
     context = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
     context.minimum_version = ssl.TLSVersion.TLSv1_2
     context.maximum_version = ssl.TLSVersion.TLSv1_2
@@ -57,6 +58,15 @@ def run(binary, pair, ca_file, *, hostname='localhost', response=None, silent=Fa
 
     def serve():
         try:
+            if retry:
+                # First connection deliberately never answers TLS. Observe
+                # the client closing it before accepting its fresh retry.
+                first, _ = server.accept()
+                with first:
+                    first.settimeout(4)
+                    while first.recv(4096):
+                        pass
+                state['first_closed'] = True
             raw, _ = server.accept()
             raw.settimeout(4)
             if silent:
@@ -109,6 +119,8 @@ def run(binary, pair, ca_file, *, hostname='localhost', response=None, silent=Fa
     thread = threading.Thread(target=serve)
     thread.start()
     environment = dict(os.environ)
+    if retry:
+        environment['RA_TEST_RETRY'] = '1'
     if entropy_failure:
         environment['RA_TEST_ENTROPY_FAILURE'] = '1'
     if utc_epoch is not None:

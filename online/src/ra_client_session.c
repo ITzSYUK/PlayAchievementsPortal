@@ -4,6 +4,7 @@
 #include "rc_api_runtime.h"
 #include "rc_error.h"
 #include "../../vendor/rcheevos/src/rc_client_internal.h"
+#include "../../vendor/rcheevos/src/rcheevos/rc_internal.h"
 #ifdef RA_SESSION_STATE_TEST
 #include "rc_client_internal.h"
 #include "rc_api_runtime.h"
@@ -11,7 +12,7 @@
 #define RA_SESSION_URL "https://retroachievements.org/dorequest.php"
 enum { EMPTY, QUEUED, ACTIVE, COMPLETE };
 typedef struct {
-    unsigned state, ticket;
+    unsigned state, ticket, kind;
     unsigned award_id;
     char* post;
     size_t post_size;
@@ -28,6 +29,8 @@ struct ra_client_session {
     session_slot slots[RA_SESSION_SLOTS];
     ra_session_stats stats;
     unsigned next_ticket;
+    ra_request_trace request_trace[RA_REQUEST_TRACE_CAPACITY];
+    unsigned trace_read, trace_write;
     int stopping, auth_pending, load_pending;
     int online_softcore;
     unsigned encore, encore_ready, initial_unlocked_count;
@@ -39,6 +42,9 @@ struct ra_client_session {
     const rc_memref_t* diag_refs[RA_DIAG_REFS];
     const rc_trigger_t* diag_trigger;
     ra_session_warning warning;
+    ra_pending* saved;
+    uint64_t wall_base,wall_started,restore_at;
+    unsigned restore_id,restore_failures,resume_read_failed;
 #ifdef RA_SESSION_STATE_TEST
     ra_state_test target_test;
     unsigned target_game, target_id;
@@ -128,6 +134,75 @@ static int initial_unlock(const ra_client_session* s,unsigned id)
     for(i=0;i<s->initial_unlocked_count;++i)if(s->initial_unlocked[i]==id)return 1;
     return 0;
 }
+static uint64_t wall_time(const ra_client_session* s)
+{ return s->wall_base+(s->config.now_ms(s->config.context)-s->wall_started)/1000; }
+static int RC_CCONV pending_can_submit(uint32_t id,rc_client_t* client)
+{
+    const ra_client_session* s=rc_client_get_userdata(client);unsigned i;
+    if(s->encore && (!s->encore_ready || initial_unlock(s,id)))return 0;
+    for(i=0;s->saved && i<s->saved->count;++i)
+        if(s->saved->entry[i].id==id && !s->saved->entry[i].native)return 0;
+    return 1;
+}
+static int bind_pending(ra_client_session* s)
+{
+    const rc_client_user_t* user=rc_client_get_user_info(s->client);
+    const rc_client_game_t* game=rc_client_get_game_info(s->client);
+    unsigned i;
+    if(!s->saved || !user || !game || !game->id)return 0;
+    if(s->saved->game_id) {
+        if(game->id!=s->saved->game_id || strcmp(game->hash,s->saved->hash))return 0;
+        for(i=0;i<65;++i) {
+            unsigned c=(unsigned char)user->username[i];
+            if(c>='A' && c<='Z')c+=32;
+            if(c!=(unsigned char)s->saved->account[i])return 0;
+            if(!c)return i!=0;
+        }
+        return 0;
+    }
+    return ra_pending_identity(s->saved,user->username,game->hash,game->id);
+}
+int ra_session_pending_enable(ra_client_session* s,uint64_t utc)
+{
+    if(!s || s->saved || !utc || s->auth_pending || rc_client_get_user_info(s->client))return 0;
+    s->saved=calloc(1,sizeof(*s->saved));if(!s->saved)return 0;
+    s->client->callbacks.can_submit_achievement_unlock=pending_can_submit;
+    s->wall_base=utc;s->wall_started=s->config.now_ms(s->config.context);return 1;
+}
+int ra_session_pending_snapshot(ra_client_session* s,ra_pending* out)
+{
+    if(!s || !out || s->load_pending || !s->online_softcore || !bind_pending(s))return 0;
+    *out=*s->saved;return 1;
+}
+unsigned ra_session_pending_generation(const ra_client_session* s)
+{ return s && s->saved?s->saved->generation:0; }
+int ra_session_pending_restore(ra_client_session* s,const ra_pending* source,uint64_t utc)
+{
+    unsigned i,j;ra_pending identity;
+    if(!s || !source || source->count>RA_PENDING_MAX || !source->generation ||
+       source->generation>=UINT32_MAX-1-source->count ||
+       !s->online_softcore || s->load_pending || s->stats.frame_calls || !bind_pending(s) ||
+       !ra_pending_identity(&identity,source->account,source->hash,source->game_id) ||
+       strcmp(identity.account,s->saved->account) || strcmp(identity.hash,s->saved->hash) ||
+       identity.game_id!=s->saved->game_id || s->saved->count)return 0;
+    for(i=0;i<source->count;++i) {
+        const rc_client_achievement_t* a=rc_client_get_achievement_info(s->client,source->entry[i].id);
+        uint64_t earned=source->entry[i].earned;
+        for(j=0;j<i;++j)if(source->entry[j].id==source->entry[i].id)return 0;
+        if(!a || a->id>=101000001u || a->state==RC_CLIENT_ACHIEVEMENT_STATE_DISABLED ||
+           a->category!=RC_CLIENT_ACHIEVEMENT_CATEGORY_CORE || !earned || earned>utc || utc-earned>RA_PENDING_MAX_AGE ||
+           memcmp(((const rc_client_achievement_info_t*)a)->md5,source->entry[i].definition,16))return 0;
+    }
+    s->saved->generation=source->generation;
+    for(i=0;i<source->count;++i) {
+        const rc_client_achievement_t* a=rc_client_get_achievement_info(s->client,source->entry[i].id);
+        if(!a->unlocked) {
+            if(!ra_pending_add(s->saved,a->id,source->entry[i].earned,0))return 0;
+            memcpy(s->saved->entry[s->saved->count-1].definition,source->entry[i].definition,16);
+        }
+    }
+    ++s->saved->generation;return 1;
+}
 /* Private callback ABI pinned by dependencies.lock.json, as diagnostics are.
  * Fail closed before the initial server snapshot exists. No synthetic ACK. */
 static int RC_CCONV encore_can_submit(uint32_t id,rc_client_t* client)
@@ -168,15 +243,23 @@ int ra_session_prepare_ui(ra_client_session* s, ra_ui* ui)
     for(b=0;b<list->num_buckets;++b)for(i=0;i<list->buckets[b].num_achievements;++i) {
         const rc_client_achievement_t* a=list->buckets[b].achievements[i];
         ra_ui_row* row;
-        if(a->id>=101000001u)continue; /* client warning, not an achievement */
+        if(a->id>=101000001u) {
+            diagnostic_text(ui->warning_title,sizeof(ui->warning_title),a->title);
+            diagnostic_text(ui->warning_description,sizeof(ui->warning_description),a->description);
+            continue; /* immutable catalog warning, not an achievement */
+        }
         if(ui->count==RA_UI_MAX) { ui->count=0; rc_client_destroy_achievement_list(list); return 0; }
         row=&ui->rows[ui->count++]; row->id=a->id; row->points=a->points;
         /* Spectator does not fetch account unlocks in pinned rc_client.
          * Never present its local trigger state as server confirmation. */
         row->state=!ui->spectator && a->unlocked?RA_UI_CONFIRMED:
             a->state==RC_CLIENT_ACHIEVEMENT_STATE_DISABLED?RA_UI_UNSUPPORTED:RA_UI_LOCKED;
+        if(s->saved && row->state==RA_UI_LOCKED) {
+            unsigned j;for(j=0;j<s->saved->count;++j)if(s->saved->entry[j].id==a->id)row->state=RA_UI_PENDING;
+        }
         diagnostic_text(row->title,sizeof(row->title),a->title);
         diagnostic_text(row->description,sizeof(row->description),a->description);
+        diagnostic_text(row->badge_name,sizeof(row->badge_name),a->badge_name);
     }
     rc_client_destroy_achievement_list(list);
     return ui->count!=0;
@@ -200,6 +283,10 @@ static void RC_CCONV client_event(const rc_client_event_t* event, rc_client_t* c
             ++s->stats.encore_events;
             event_push(s,RA_SESSION_EVENT_ENCORE,event->achievement->id);return;
         }
+        if(s->saved && event->achievement) {
+            unsigned i;for(i=0;i<s->saved->count;++i)
+                if(s->saved->entry[i].id==event->achievement->id && !s->saved->entry[i].native)return;
+        }
         ++s->stats.earned_events;
         s->stats.last_earned_id = event->achievement ? event->achievement->id : 0;
         event_push(s, RA_SESSION_EVENT_CONDITION, s->stats.last_earned_id);
@@ -207,6 +294,7 @@ static void RC_CCONV client_event(const rc_client_event_t* event, rc_client_t* c
     if (event->type == RC_CLIENT_EVENT_SERVER_ERROR) {
         ++s->stats.server_errors;
         event_push(s, RA_SESSION_EVENT_REJECTED, event->server_error ? event->server_error->related_id : 0);
+        if(s->saved && event->server_error)ra_pending_remove(s->saved,event->server_error->related_id);
     }
 }
 /* Native private ABI pinned to rcheevos 12.5.0 / 1433173220a7eaede6a9ed7a18e94117be1821e0.
@@ -310,6 +398,29 @@ static unsigned award_id(const char* post)
     }
     return (*p == '&' || !*p) ? id : 0;
 }
+/* Caller holds the adapter lock. Timestamp arithmetic intentionally wraps at
+ * 32-bit milliseconds; request lifetimes are bounded to 30 seconds. */
+static void request_trace(ra_client_session* s, const session_slot* slot, unsigned stage)
+{
+    ra_request_trace* event;
+    unsigned now=(unsigned)s->config.now_ms(s->config.context);
+    if(s->trace_write-s->trace_read==RA_REQUEST_TRACE_CAPACITY) {
+        ++s->trace_read; ++s->stats.request_trace_dropped;
+    }
+    event=&s->request_trace[s->trace_write++ % RA_REQUEST_TRACE_CAPACITY];
+    *event=(ra_request_trace){slot->ticket,slot->kind,stage,now,
+        now-(unsigned)(slot->deadline_ms-RA_SESSION_TIMEOUT_MS),slot->status};
+}
+int ra_session_take_request_trace(ra_client_session* s, ra_request_trace* output)
+{
+    int found=0;
+    if(!s || !output)return 0;
+    lock(s);
+    if(s->trace_read!=s->trace_write) {
+        *output=s->request_trace[s->trace_read++ % RA_REQUEST_TRACE_CAPACITY]; found=1;
+    }
+    unlock(s);return found;
+}
 static void RC_CCONV server_call(const rc_api_request_t* request, rc_client_server_callback_t callback,
     void* data, rc_client_t* client)
 {
@@ -329,6 +440,16 @@ static void RC_CCONV server_call(const rc_api_request_t* request, rc_client_serv
              strstr(request->post_data, "&h=0&") && award_id(request->post_data)))))) {
         callback(&failure, data); return;
     }
+    if(s->saved && !strncmp(request->post_data,"r=awardachievement&",19) &&
+       (!bind_pending(s) || !ra_pending_add(s->saved,award_id(request->post_data),wall_time(s),1))) {
+        failure.http_status_code=RC_API_SERVER_RESPONSE_RETRYABLE_CLIENT_ERROR;
+        callback(&failure,data);return;
+    }
+    if(s->saved && !strncmp(request->post_data,"r=awardachievement&",19)) {
+        unsigned id=award_id(request->post_data),j;
+        const rc_client_achievement_info_t* a=(const rc_client_achievement_info_t*)rc_client_get_achievement_info(client,id);
+        if(a)for(j=0;j<s->saved->count;++j)if(s->saved->entry[j].id==id)memcpy(s->saved->entry[j].definition,a->md5,16);
+    }
     lock(s);
     /* A full bounded transport queue is temporary backpressure, not rejection
      * of the achievement. rc_client retains its bounded per-achievement retry. */
@@ -340,7 +461,11 @@ static void RC_CCONV server_call(const rc_api_request_t* request, rc_client_serv
             if (slot->state != EMPTY) continue;
             if (request->post_data) {
                 slot->post = malloc(size + 1);
-                if (!slot->post) {failure.http_status_code=RC_API_SERVER_RESPONSE_CLIENT_ERROR;break;}
+                if (!slot->post) {
+                    if(!s->saved || strncmp(request->post_data,"r=awardachievement&",19))
+                        failure.http_status_code=RC_API_SERVER_RESPONSE_CLIENT_ERROR;
+                    break;
+                }
                 memcpy(slot->post, request->post_data, size + 1);
                 slot->post_size = size;
                 s->stats.buffer_bytes += size + 1;
@@ -352,8 +477,13 @@ static void RC_CCONV server_call(const rc_api_request_t* request, rc_client_serv
             slot->ticket = ++s->next_ticket;
             if (!slot->ticket) slot->ticket = ++s->next_ticket;
             slot->deadline_ms = s->config.now_ms(s->config.context) + RA_SESSION_TIMEOUT_MS;
+            slot->kind = !strncmp(request->post_data,"r=login2&",9)?RA_REQUEST_LOGIN:
+                !strncmp(request->post_data,"r=achievementsets&",18)?RA_REQUEST_SET:
+                !strncmp(request->post_data,"r=startsession&",15)?RA_REQUEST_START:
+                !strncmp(request->post_data,"r=ping&",7)?RA_REQUEST_PING:RA_REQUEST_AWARD;
             slot->state = QUEUED;
             ++s->stats.pending; ++s->stats.submitted;
+            request_trace(s,slot,RA_REQUEST_QUEUED);
             unlock(s); return;
         }
     }
@@ -461,7 +591,9 @@ int ra_session_take_request(ra_client_session* s, ra_session_request* output)
         if (slot->state != QUEUED) continue;
         slot->state = ACTIVE;
         output->ticket = slot->ticket; output->url = RA_SESSION_URL;
+        output->kind = slot->kind;
         output->post_data = slot->post; output->post_size = slot->post_size; output->deadline_ms = slot->deadline_ms;
+        request_trace(s,slot,RA_REQUEST_OFFERED);
         unlock(s); return 1;
     }
     unlock(s); return 0;
@@ -511,6 +643,7 @@ int ra_session_complete(ra_client_session* s, unsigned ticket, int status, const
             else s->stats.last_copy_error = RA_SESSION_COPY_NO_MEMORY;
         }
         slot->state = COMPLETE;
+        request_trace(s,slot,RA_REQUEST_RESPONSE);
         unlock(s); return 1;
     }
     unlock(s); return 0;
@@ -526,6 +659,7 @@ static void pump(ra_client_session* s)
         if (s->slots[i].state == QUEUED && s->config.now_ms(s->config.context) >= s->slots[i].deadline_ms) {
             s->slots[i].status = s->stopping?RC_API_SERVER_RESPONSE_CLIENT_ERROR:RC_API_SERVER_RESPONSE_RETRYABLE_CLIENT_ERROR;
             s->slots[i].state = COMPLETE;
+            request_trace(s,&s->slots[i],RA_REQUEST_RESPONSE);
         }
         if (s->slots[i].state != COMPLETE) { unlock(s); continue; }
         done = s->slots[i]; memset(&s->slots[i], 0, sizeof(s->slots[i]));
@@ -535,6 +669,7 @@ static void pump(ra_client_session* s)
         --s->stats.pending; ++s->stats.completed;
         erase_free(done.post, done.post_size + 1);
         s->stats.buffer_bytes -= post_bytes;
+        request_trace(s,&done,RA_REQUEST_CALLBACK_BEGIN);
         unlock(s);
         response.body = done.body ? done.body : ""; response.body_length = done.body_size; response.http_status_code = done.status;
         if (done.award_id && response.http_status_code == 200) {
@@ -544,6 +679,16 @@ static void pump(ra_client_session* s)
                 ++s->stats.award_confirmed;
                 s->stats.last_confirmed_id = done.award_id;
                 event_push(s, RA_SESSION_EVENT_CONFIRMED, done.award_id);
+                if(s->saved)ra_pending_remove(s->saved,done.award_id);
+                if(s->restore_id==done.award_id) {
+                    rc_client_achievement_info_t* a=(rc_client_achievement_info_t*)rc_client_get_achievement_info(s->client,done.award_id);
+                    if(a) {
+                        a->public_.unlocked|=RC_CLIENT_ACHIEVEMENT_UNLOCKED_SOFTCORE;
+                        a->public_.state=RC_CLIENT_ACHIEVEMENT_STATE_UNLOCKED;
+                        if(a->trigger)a->trigger->state=RC_TRIGGER_STATE_INACTIVE;
+                        rc_client_update_active_achievements(s->client->game);
+                    }
+                }
             } else if (result == 0 && award.response.succeeded) {
                 ++s->stats.server_errors;
                 event_push(s, RA_SESSION_EVENT_REJECTED, done.award_id);
@@ -551,14 +696,86 @@ static void pump(ra_client_session* s)
             rc_api_destroy_award_achievement_response(&award);
         }
         done.callback(&response, done.callback_data);
+        lock(s);request_trace(s,&done,RA_REQUEST_CALLBACK_END);unlock(s);
         erase_free(done.body, done.body_size + 1);
         lock(s); s->stats.buffer_bytes -= body_bytes; unlock(s);
     }
+}
+static void RC_CCONV restored_complete(const rc_api_server_response_t* response,void* data)
+{
+    ra_client_session* s=data;
+    unsigned id=s->restore_id;
+    rc_api_award_achievement_response_t award;
+    int result=rc_api_process_award_achievement_server_response(&award,response);
+    s->restore_id=0;
+    if(response->http_status_code<100 || response->http_status_code==429 ||
+       response->http_status_code>=500 || (response->http_status_code==200 && result!=RC_OK)) {
+        unsigned delay=s->restore_failures>=6?60000u:1000u<<s->restore_failures++;
+        s->restore_at=s->config.now_ms(s->config.context)+delay;
+    } else {
+        int accepted=result==RC_OK && award.response.succeeded && award.awarded_achievement_id==id;
+        if(s->saved)ra_pending_remove(s->saved,id);
+        if(!accepted){++s->stats.server_errors;event_push(s,RA_SESSION_EVENT_REJECTED,id);}
+        s->restore_failures=0;
+    }
+    rc_api_destroy_award_achievement_response(&award);
+}
+static void restore_tick(ra_client_session* s)
+{
+    unsigned i;
+    if(!s->saved || s->restore_id || !s->online_softcore || s->load_pending ||
+       s->config.now_ms(s->config.context)<s->restore_at)return;
+    for(i=0;i<s->saved->count;++i)if(!s->saved->entry[i].native) {
+        rc_api_award_achievement_request_t parameters;
+        rc_api_request_t request;
+        const rc_client_user_t* user=rc_client_get_user_info(s->client);
+        uint64_t now=wall_time(s),earned=s->saved->entry[i].earned;
+        if(!user || now<earned || now-earned>RA_PENDING_MAX_AGE)return;
+        memset(&parameters,0,sizeof(parameters));
+        parameters.username=user->username;parameters.api_token=user->token;
+        parameters.achievement_id=s->saved->entry[i].id;parameters.game_hash=s->saved->hash;
+        parameters.seconds_since_unlock=(uint32_t)(now-earned);
+        if(rc_api_init_award_achievement_request_hosted(&request,&parameters,&s->client->state.host)!=RC_OK)return;
+        s->restore_id=parameters.achievement_id;
+        server_call(&request,restored_complete,s,s->client);
+        rc_api_destroy_request(&request);
+        return;
+    }
+}
+static uint32_t RC_CCONV resume_peek(uint32_t address,uint32_t size,void* data)
+{
+    ra_client_session* s=data;uint8_t bytes[4];uint32_t value=0,i;
+    if(!size || size>4 || client_read(address,bytes,size,s->client)!=size) {
+        s->resume_read_failed=1;return 0;
+    }
+    for(i=0;i<size;++i)value|=(uint32_t)bytes[i]<<(i*8);
+    return value;
+}
+int ra_session_resume(ra_client_session* s)
+{
+    rc_memrefs_t* refs;rc_memref_list_t* list;rc_modified_memref_list_t* modified;unsigned i;
+    if(!s || s->stopping || s->load_pending || !s->client->game ||
+       !(refs=s->client->game->runtime.memrefs))return 0;
+    s->resume_read_failed=0;
+    rc_update_memref_values(refs,resume_peek,s);
+    if(s->resume_read_failed)return 0;
+    /* A sleep gap does not prove uninterrupted gameplay. Rebase cached values
+     * without evaluating triggers, then reset hits/WAITING via public rc_client. */
+    for(list=&refs->memrefs;list;list=list->next)for(i=0;i<list->count;++i) {
+        list->items[i].value.prior=list->items[i].value.value;
+        list->items[i].value.changed=0;
+    }
+    for(modified=&refs->modified_memrefs;modified;modified=modified->next)for(i=0;i<modified->count;++i) {
+        modified->items[i].memref.value.prior=modified->items[i].memref.value.value;
+        modified->items[i].memref.value.changed=0;
+    }
+    rc_client_reset(s->client);return rc_client_get_game_info(s->client)!=NULL;
 }
 void ra_session_tick(ra_client_session* s, int verified_frame, int paused)
 {
     if (!s || s->stopping) return;
     pump(s);
+    restore_tick(s);
 #ifndef RA_SESSION_NO_FRAMES
     if (verified_frame && !paused) { ++s->stats.frame_calls; rc_client_do_frame(s->client); diagnostic_frame(s); }
     else { ++s->stats.idle_calls; rc_client_idle(s->client); }
@@ -589,6 +806,7 @@ int ra_session_close(ra_client_session* s)
     ra_state_test_destroy(&s->target_test);
 #endif
     free(s->diagnostic);
+    free(s->saved);
     free(s);
     return 1;
 }

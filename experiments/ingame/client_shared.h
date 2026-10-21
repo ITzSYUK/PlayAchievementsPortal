@@ -5,8 +5,8 @@
 #define RA_CLIENT_MAGIC UINT32_C(0x52414339)
 #ifdef RA_CLIENT_HTTPS
 #include "ra_game_memory.h"
-#define RA_CLIENT_MINOR 41
-#define RA_CLIENT_VERSION "0.41"
+#define RA_CLIENT_MINOR 51
+#define RA_CLIENT_VERSION "0.51"
 #define RA_CLIENT_RUNTIME "rc_client-softcore"
 #define RA_CLIENT_STATIC_AUDIT_ONLY 0
 #define RA_CLIENT_RUNTIME_PROBE_ONLY 0
@@ -19,6 +19,7 @@
 #define RA_CLIENT_REQUEST_SECOND 10u
 #define RA_CLIENT_OBSERVE_SECONDS 720u
 #define RA_CLIENT_BOOT_LOG_LIMIT 131072u
+#define RA_CLIENT_EXIT_LOG_RESERVE 1024u
 #define RA_CLIENT_SAMPLE_MS 0u
 #define RA_CLIENT_USER_SIZE UINT32_C(0x02800000)
 #define RA_CLIENT_HEAP_BYTES 2097152u
@@ -47,10 +48,11 @@ static inline int ra_client_user_range(uint32_t address, uint32_t size)
 }
 #define RA_CLIENT_ENTRY_STACK 8192u
 #ifdef RA_CLIENT_HTTPS
-/* 0.40 reconnect/status code needs ~340 KiB PT_LOAD and ~405 KiB PRX.
- * Both bounds enter preflight; the free floor and heap are unchanged. */
-#define RA_CLIENT_MODULE_LIMIT 352256u
-#define RA_CLIENT_FILE_LIMIT 417792u
+/* 0.50: measured PRX fits 376 KiB PT_LOAD / 440 KiB file reserves.
+ * Reserves rounded to 4 KiB; heap and free floor stay unchanged.
+ * Pending snapshots/wire are bounded BSS; DNS retains its 8 KiB stack. */
+#define RA_CLIENT_MODULE_LIMIT 385024u
+#define RA_CLIENT_FILE_LIMIT 450560u
 #else
 #define RA_CLIENT_MODULE_LIMIT 294912u
 #define RA_CLIENT_FILE_LIMIT 327680u
@@ -59,6 +61,8 @@ static inline int ra_client_user_range(uint32_t address, uint32_t size)
 #define RA_CLIENT_START_FREE (RA_CLIENT_MODULE_LIMIT + RA_CLIENT_FILE_LIMIT + RA_CLIENT_FREE_FLOOR + 4096u)
 #ifdef RA_CLIENT_HTTPS
 #define RA_STOP_PENDING 0x7FFFFFFF
+#define RA_EXIT_USER_REBOOT 1u
+#define RA_EXIT_USER_STOP 2u
 enum { RA_STOP_NONE, RA_STOP_ENTER, RA_STOP_WAIT, RA_STOP_WAIT_ERROR,
        RA_STOP_NOT_DONE, RA_STOP_DELETE, RA_STOP_DELETE_ERROR, RA_STOP_FINISHED,
        RA_STOP_NO_THREAD, RA_STOP_REFER_ERROR, RA_STOP_THREAD_RUNNING };
@@ -68,6 +72,9 @@ typedef struct {
     volatile uint32_t stop, ready, done, idle_calls, frame_calls;
     volatile int result;
 #ifdef RA_CLIENT_HTTPS
+    uint32_t log_session;
+    volatile uint32_t exit_user_flags;
+    volatile uint32_t power_flags, resume_stage;
     volatile uint32_t request_allowed;
     /* Immutable game map published before request_allowed. No callback or
      * kernel function pointer is passed across the privilege boundary. */

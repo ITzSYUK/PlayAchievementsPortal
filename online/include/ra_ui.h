@@ -8,6 +8,9 @@ enum { RA_UI_LOCKED, RA_UI_CONFIRMED, RA_UI_PENDING, RA_UI_LOCAL,
 typedef struct {
     unsigned id, points, state;
     char title[96], description[256];
+    char badge_name[8];
+    /* Worker-owned 32x32 RGB565, never accessed by the rc_client owner. */
+    const uint16_t* badge;
 } ra_ui_row;
 typedef struct { unsigned type, id, time_ms; } ra_ui_notice;
 typedef struct {
@@ -17,7 +20,18 @@ typedef struct {
     unsigned count, spectator, encore;
     unsigned write, read, dropped;
     ra_ui_notice notices[RA_UI_NOTICES];
+    char warning_title[128], warning_description[256];
+    unsigned reason;
+    int error_code;
+    unsigned details;
 } ra_ui;
+enum { RA_REASON_NONE, RA_REASON_WIFI_OFF, RA_REASON_APCTL, RA_REASON_DNS,
+       RA_REASON_CONNECT, RA_REASON_TLS, RA_REASON_CERTIFICATE, RA_REASON_TIMEOUT,
+       RA_REASON_AUTH, RA_REASON_SET, RA_REASON_MEMORY, RA_REASON_STORAGE,
+       RA_REASON_RESUME, RA_REASON_BADGE, RA_REASON_QUEUE, RA_REASON_RESPONSE };
+const char* ra_ui_reason(unsigned);
+unsigned ra_ui_transport_reason(int code,int status,int dns_result,const char* stage,
+                                uint32_t verify_flags,unsigned request_kind);
 void ra_ui_init(ra_ui*, unsigned spectator);
 void ra_ui_publish(ra_ui*, unsigned type, unsigned id, unsigned time_ms);
 int ra_ui_take(ra_ui*, ra_ui_notice*);
@@ -33,7 +47,7 @@ int ra_ui_surface_valid(const ra_ui_surface*);
 void ra_ui_draw(const ra_ui*, const ra_ui_surface*, int menu, unsigned filter,
                 unsigned selected, const ra_ui_notice* notice);
 #define RA_NOTICE_X 112u
-#define RA_NOTICE_Y 205u
+#define RA_NOTICE_Y 8u
 #define RA_NOTICE_WIDTH 360u
 #define RA_NOTICE_HEIGHT 59u
 /* Copy an already composed RGB565 card to a validated, not-yet-displayed

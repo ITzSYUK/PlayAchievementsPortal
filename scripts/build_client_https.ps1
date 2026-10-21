@@ -16,6 +16,8 @@ if ($LASTEXITCODE -ne 0) { throw 'Bounded HTTPS build failed' }
 & wsl -d Ubuntu -- python3 "$linuxDirectory/scripts/check_https_elf.py" "$linuxDirectory/experiments/psp/ingame/https/kernel/RAClientBootstrap.elf" "$linuxDirectory/experiments/psp/ingame/https/user/RAClientUser.elf"
 if ($LASTEXITCODE -ne 0) { throw 'PSP module metadata/exports/heap verification failed' }
 $sharedHeader = Get-Content -LiteralPath (Join-Path $projectDirectory 'experiments/ingame/client_shared.h') -Raw
+$clientVersion = [regex]::Match($sharedHeader, '#define RA_CLIENT_VERSION "([0-9]+\.[0-9]+)"').Groups[1].Value
+if (-not $clientVersion) { throw 'Cannot determine client version' }
 $moduleLimit = [int]([regex]::Match($sharedHeader, '#define RA_CLIENT_MODULE_LIMIT (\d+)u').Groups[1].Value)
 $fileLimit = [int]([regex]::Match($sharedHeader, '#define RA_CLIENT_FILE_LIMIT (\d+)u').Groups[1].Value)
 $sizeRows = [regex]::Matches(($buildOutput -join "`n"), '(?m)^\s*\d+\s+\d+\s+\d+\s+(\d+)\s+[0-9a-f]+\s+[^\r\n]*RAClientUser\.elf\s*$')
@@ -28,20 +30,9 @@ $entries = @{
     'SEPLUGINS/RAClientLite/profile.txt' = 'experiments/ingame/profile-https.txt'
     'SEPLUGINS/RAClientLite/mode.txt' = 'experiments/ingame/mode.txt'
     'SEPLUGINS/RAClientLite/duration.txt' = 'experiments/ingame/duration.txt'
-    'HTTPS_CLIENT.md' = 'docs/HTTPS_CLIENT.md'
-    'ONLINE_CLIENT_031.md' = 'docs/ONLINE_CLIENT_031.md'
-    'ONLINE_CLIENT_032.md' = 'docs/ONLINE_CLIENT_032.md'
-    'ONLINE_CLIENT_033.md' = 'docs/ONLINE_CLIENT_033.md'
-    'ONLINE_CLIENT_034.md' = 'docs/ONLINE_CLIENT_034.md'
-    'ONLINE_CLIENT_035.md' = 'docs/ONLINE_CLIENT_035.md'
-    'ONLINE_CLIENT_036.md' = 'docs/ONLINE_CLIENT_036.md'
-    'ONLINE_CLIENT_037.md' = 'docs/ONLINE_CLIENT_037.md'
-    'ONLINE_CLIENT_038.md' = 'docs/ONLINE_CLIENT_038.md'
-    'ONLINE_CLIENT_039.md' = 'docs/ONLINE_CLIENT_039.md'
-    'ONLINE_CLIENT_040.md' = 'docs/ONLINE_CLIENT_040.md'
-    'ONLINE_CLIENT_041.md' = 'docs/ONLINE_CLIENT_041.md'
+    'README.md' = 'README.md'
+    'LICENSE_NOTICE.md' = 'LICENSE_NOTICE.md'
     'SEPLUGINS/RAClientLite/encore.txt' = 'experiments/ingame/encore.txt'
-    'PPSSPP_FRAME_AUDIT.md' = 'docs/PPSSPP_FRAME_AUDIT.md'
     'configure_psp_login.py' = 'scripts/configure_psp_login.py'
     'configure_psp_login.ps1' = 'scripts/configure_psp_login.ps1'
     'INSTALL_ENTRY.txt' = 'experiments/ingame/INSTALL_CLIENT_ENTRY.txt'
@@ -56,7 +47,7 @@ foreach ($entry in $entries.Keys) {
     New-Item -ItemType Directory -Path (Split-Path -Parent $destination) -Force | Out-Null
     Copy-Item -LiteralPath (Join-Path $projectDirectory $entries[$entry]) -Destination $destination -Force
 }
-$archivePath = Join-Path $outputDirectory 'PSP_RA_HTTPS_v0.41.zip'
+$archivePath = Join-Path $outputDirectory "PSP_RA_HTTPS_v$clientVersion.zip"
 $stream = [System.IO.File]::Open($archivePath, [System.IO.FileMode]::Create)
 try {
     $archive = [System.IO.Compression.ZipArchive]::new($stream, [System.IO.Compression.ZipArchiveMode]::Create, $true)

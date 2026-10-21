@@ -41,8 +41,8 @@ static mbedtls_time_t utc(mbedtls_time_t* out)
 }
 static int check(void)
 {
-    if (active->cancelled(active->context)) return RA_HTTPS_CANCEL;
     if (active->now_ms(active->context) >= active->deadline_ms) return RA_HTTPS_TIMEOUT;
+    if (active->cancelled(active->context)) return RA_HTTPS_CANCEL;
     if (utc(NULL) == (mbedtls_time_t)-1) return RA_HTTPS_INVALID;
     return 0;
 }

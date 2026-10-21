@@ -3,6 +3,20 @@ CC ?= cc
 CPPFLAGS += -I../../online/include
 CFLAGS ?= -O2 -g -std=c99 -Wall -Wextra -Werror
 .PHONY: test
+test: socket-io-test
+test: dns-job-test
+.PHONY: dns-job-test
+dns-job-test: $(BUILD)/test_dns_job
+	$(BUILD)/test_dns_job
+$(BUILD)/test_dns_job: test_dns_job.c ../psp/ingame/https/user/dns_job.h ../../online/include/ra_https.h
+	mkdir -p $(BUILD)
+	$(CC) $(CPPFLAGS) $(CFLAGS) test_dns_job.c -pthread $(LDFLAGS) -o $@
+.PHONY: socket-io-test
+socket-io-test: $(BUILD)/test_socket_io
+	$(BUILD)/test_socket_io
+$(BUILD)/test_socket_io: test_socket_io.c ../psp/ingame/https/user/socket_io.h
+	mkdir -p $(BUILD)
+	$(CC) $(CPPFLAGS) $(CFLAGS) test_socket_io.c $(LDFLAGS) -o $@
 test: display-import-test
 test: reconnect-test
 .PHONY: reconnect-test
@@ -29,6 +43,15 @@ $(BUILD)/test_ui_display: test_ui_display.c ui_display.h ui_pause.h
 	mkdir -p $(BUILD)
 	$(CC) $(CPPFLAGS) $(CFLAGS) test_ui_display.c -pthread $(LDFLAGS) -o $@
 test: $(BUILD)/test_log_sync
+test: log-history-test
+.PHONY: log-history-test
+log-history-test: $(BUILD)/test_log_history
+	$(BUILD)/test_log_history
+$(BUILD)/test_log_history: test_log_history.c log_history.h log_lifecycle.h kernel_format.c ../common/probe_log.c
+	mkdir -p $(BUILD)
+	$(CC) $(CPPFLAGS) $(CFLAGS) -I../common test_log_history.c kernel_format.c ../common/probe_log.c $(LDFLAGS) -o $@
+$(BUILD)/test_https_bootstrap: log_history.h log_lifecycle.h kernel_format.c
+$(BUILD)/test_https_bootstrap: ../psp/ingame/https/kernel/exit_notice.h
 $(BUILD)/test_log_sync: test_log_sync.c ../psp/ingame/https/user/log_sync.h
 	mkdir -p $(BUILD)
 	$(CC) $(CPPFLAGS) $(CFLAGS) test_log_sync.c $(LDFLAGS) -o $@
@@ -93,7 +116,7 @@ $(BUILD)/test_client_cleanup: test_client_cleanup.c lite_test_sdk.h client_share
 	$(CC) $(CPPFLAGS) $(CFLAGS) -I. -I../common -ffunction-sections -fdata-sections test_client_cleanup.c ../common/probe_log.c placement2_policy.c -Wl,--gc-sections $(LDFLAGS) -o $@
 $(BUILD)/test_https_bootstrap: game_code_audit.c game_code_audit.h ../psp/ingame/https/kernel/game_audit.h ../../online/src/ra_game_memory.c ../../online/src/ra_psp_memory.c test_client_cleanup.c lite_test_sdk.h client_shared.h ../psp/ingame/client/kernel/main.c ../common/probe_log.c ../common/probe_log.h placement2_policy.c placement2_policy.h
 	mkdir -p $(BUILD)
-	$(CC) $(CPPFLAGS) $(CFLAGS) -DRA_CLIENT_HTTPS -I. -I../common -ffunction-sections -fdata-sections game_code_audit.c ../../online/src/ra_game_memory.c ../../online/src/ra_psp_memory.c test_client_cleanup.c ../common/probe_log.c placement2_policy.c -Wl,--gc-sections $(LDFLAGS) -o $@
+	$(CC) $(CPPFLAGS) $(CFLAGS) -DRA_CLIENT_HTTPS -I. -I../common -ffunction-sections -fdata-sections game_code_audit.c ../../online/src/ra_game_memory.c ../../online/src/ra_psp_memory.c test_client_cleanup.c ../common/probe_log.c placement2_policy.c kernel_format.c -Wl,--gc-sections $(LDFLAGS) -o $@
 $(BUILD)/test_https_stop: test_https_stop.c lite_test_sdk.h client_shared.h ../psp/ingame/https/user/stop_owner.h
 	mkdir -p $(BUILD)
 	$(CC) $(CPPFLAGS) $(CFLAGS) -I. test_https_stop.c $(LDFLAGS) -o $@
